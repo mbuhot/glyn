@@ -40,10 +40,9 @@ fn syn_register(scope: atom.Atom, name: String, pid: Pid, metadata: metadata) ->
 fn syn_lookup(scope: atom.Atom, name: String) -> Dynamic
 
 @external(erlang, "syn", "unregister")
-fn syn_unregister(scope: atom.Atom, name: String) -> Result(atom.Atom, Dynamic)
+fn syn_unregister(scope: atom.Atom, name: String) -> Dynamic
 
-@external(erlang, "syn", "registered")
-fn syn_registered(scope: atom.Atom) -> List(String)
+
 
 // Type-safe PubSub wrapper
 pub opaque type PubSub(message) {
@@ -176,7 +175,11 @@ pub fn register(
 
 /// Unregister a process
 pub fn unregister(registration: Registration(message, metadata)) -> Result(Nil, String) {
-  todo as "implement unregister"
+  let result = syn_unregister(registration.registry.scope, registration.name)
+  case result == to_dynamic(atom.create("ok")) {
+    True -> Ok(Nil)
+    False -> Error("Unregistration failed: " <> string.inspect(result))
+  }
 }
 
 /// Look up a registered process and return a type-safe Subject with metadata
@@ -196,10 +199,11 @@ pub fn lookup(registry: Registry(message, metadata), name: String) -> Result(#(S
 
 /// Send a type-safe message to a registered process
 pub fn send_to_registered(registry: Registry(message, metadata), name: String, message: message) -> Result(Nil, String) {
-  todo as "implement send_to_registered"
-}
-
-/// Get list of all registered names in the registry
-pub fn registered_names(registry: Registry(message, metadata)) -> List(String) {
-  todo as "implement registered_names"
+  case lookup(registry, name) {
+    Ok(#(subject, _metadata)) -> {
+      process.send(subject, message)
+      Ok(Nil)
+    }
+    Error(reason) -> Error(reason)
+  }
 }
