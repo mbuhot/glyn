@@ -33,8 +33,8 @@ let selector =
 
 ### Scope vs Type Safety
 - **Scope**: Runtime namespace for syn (isolates different PubSub systems)
-- **Type ID**: Compile-time type safety (ensures message type consistency across nodes)
-- **NEVER reuse the same scope + type_id for different message types**
+- **MessageType**: Compile-time type safety (ensures message type consistency across nodes)
+- **NEVER reuse the same scope + MessageType for different message types**
 
 ## Critical Design Lessons
 
@@ -49,25 +49,27 @@ PubSub(scope: scope_atom, tag: reference.new())
 
 **Correct Approach**:
 ```gleam
-// Deterministic tag from type_id = clustering works
-PubSub(scope: scope_atom, type_id: atom.create(type_id))
+// Deterministic tag from MessageType = clustering works
+PubSub(scope: scope_atom, tag: phash2(message_type.id))
 ```
 
 **Lesson**: **Always consider distributed scenarios** - what works locally might break in clusters.
 
 ### 2. **Type Safety Through Explicit Type IDs**
-**Problem**: Two string parameters are error-prone and don't communicate intent.
+**Problem**: Generic parameters are error-prone and don't provide type safety.
 
-**Solution**: Labelled arguments with clear semantics:
+**Solution**: MessageType pattern with compile-time safety:
 ```gleam
-// Clear, self-documenting, prevents argument swapping
-let pubsub = glyn.new(scope: "user_events", type_id: "UserEvent_v1")
+// Type-safe, self-documenting, prevents message type confusion
+pub const user_event_type: glyn.MessageType(UserEvent) = glyn.MessageType("UserEvent_v1")
+let pubsub = glyn.new_pubsub(scope: "user_events", message_type: user_event_type)
 ```
 
-### 3. **Separation of Concerns: Syn vs Type System**
-- **Syn handles**: Group membership, message routing, distribution
+### 3. **True PubSub-Level Type Safety**
+- **Syn handles**: Type-tagged group membership, message routing, distribution
 - **Type system handles**: Compile-time safety, message structure
-- **Don't conflate them**: Same scope can have different type_ids for different message types
+- **Groups are tagged**: Different MessageTypes use different syn groups `#(group, tag)`
+- **No wasted delivery**: Messages only reach compatible subscribers
 
 ## Actor Integration Patterns
 
@@ -121,14 +123,16 @@ let selector =
 
 ```gleam
 // Node A and Node B both do this - they'll communicate
-let pubsub = glyn.new(scope: "global_events", type_id: "OrderEvent_v1")
+pub const order_event_type: glyn.MessageType(OrderEvent) = glyn.MessageType("OrderEvent_v1")
+let pubsub = glyn.new_pubsub(scope: "global_events", message_type: order_event_type)
 ```
 
 ### Testing Distributed Behavior
 ```gleam
 // Simulate distributed by creating multiple PubSub instances
-let pubsub1 = glyn.new(scope: "test_scope", type_id: "Message_v1")  // "Node 1"
-let pubsub2 = glyn.new(scope: "test_scope", type_id: "Message_v1")  // "Node 2"
+pub const message_type: glyn.MessageType(Message) = glyn.MessageType("Message_v1")
+let pubsub1 = glyn.new_pubsub(scope: "test_scope", message_type: message_type)  // "Node 1"
+let pubsub2 = glyn.new_pubsub(scope: "test_scope", message_type: message_type)  // "Node 2"
 
 let subscription = glyn.subscribe(pubsub1, "channel", process.self())
 let reached = glyn.publish(pubsub2, "channel", "cross-node message")
@@ -153,8 +157,10 @@ let _ = syn_join(scope, group, pid)  // Don't wrap in Result unnecessarily
 ### Message Structure
 ```gleam
 // Tagged message format for process system compatibility
-let tagged_message = #(type_id_atom, user_message)
-let _ = syn_publish(scope, group, to_dynamic(tagged_message))
+let tagged_message = #(to_dynamic(pubsub.tag), user_message)
+// Use tagged group to ensure type safety
+let tagged_group = #(group, pubsub.tag)
+let _ = syn_publish(scope, tagged_group, to_dynamic(tagged_message))
 ```
 
 ### Don't Over-Engineer
@@ -169,21 +175,26 @@ Always include a test that demonstrates what happens when type safety is violate
 
 ```gleam
 pub fn type_safety_violation_test() {
-  let chat_pubsub: glyn.PubSub(ChatMessage) = glyn.new(scope: "app", type_id: "messages")
-  let evil_pubsub: glyn.PubSub(MetricEvent) = glyn.new(scope: "app", type_id: "messages")
+  pub const chat_type: glyn.MessageType(ChatMessage) = glyn.MessageType("ChatMessage_v1")
+  pub const metric_type: glyn.MessageType(MetricEvent) = glyn.MessageType("MetricEvent_v1")
+  
+  let chat_pubsub = glyn.new_pubsub(scope: "app", message_type: chat_type)
+  let metric_pubsub = glyn.new_pubsub(scope: "app", message_type: metric_type)
   
   let subscription = glyn.subscribe(chat_pubsub, "channel", process.self())
-  // This will crash the actor with "no case clause matching"
-  let _ = glyn.publish(evil_pubsub, "channel", CounterIncrement("hack", 1))
+  // This finds 0 subscribers - PubSub-level type safety prevents delivery
+  let reached = glyn.publish(metric_pubsub, "channel", CounterIncrement("hack", 1))
+  assert reached == 0
 }
 ```
 
-**Expected Result**: Actor crash with pattern match failure - proves type safety is enforced.
+**Expected Result**: No message delivery to incompatible subscribers - proves PubSub-level type safety.
 
-### Type ID Naming Conventions
-- Include message type: `"ChatMessage_v1"`
-- Include version: `"UserEvent_v2"`
-- Be explicit: `"OrderCreated_v1"` not just `"order"`
+### MessageType Naming Conventions
+- Include message type: `glyn.MessageType("ChatMessage_v1")`
+- Include version: `glyn.MessageType("UserEvent_v2")`
+- Be explicit: `glyn.MessageType("OrderCreated_v1")` not just `"order"`
+- Use constants: `pub const chat_type: glyn.MessageType(ChatMessage) = glyn.MessageType("ChatMessage_v1")`
 
 ## Testing PubSub Systems
 
@@ -218,10 +229,10 @@ let count = actor.call(actor, waiting: 1000, sending: GetMessageCount)
 
 ## API Design Principles
 
-### Labelled Arguments for Safety
+### MessageType Pattern for Safety
 ```gleam
-// Prevents argument confusion, self-documenting
-pub fn new(scope scope_name: String, type_id type_id: String) -> PubSub(message)
+// Type-safe, prevents message type confusion, self-documenting
+pub fn new_pubsub(scope scope: String, message_type message_type: MessageType(message)) -> PubSub(message)
 ```
 
 ### Avoid Inefficient Helpers
@@ -246,9 +257,9 @@ pub fn publish(pubsub: PubSub(message), group: String, message: message) -> Int
 
 ## Common Pitfalls
 
-### 1. **Reusing Scope + Type ID**
-**Problem**: Same scope and type_id for different message types breaks type safety.
-**Solution**: Unique type_id per message type, even in same scope.
+### 1. **Reusing Scope + MessageType**
+**Problem**: Same scope and MessageType for different message types breaks type safety.
+**Solution**: Unique MessageType per message type, even in same scope.
 
 ### 2. **Ignoring Distributed Scenarios**  
 **Problem**: Code works locally but breaks in clusters.
@@ -258,15 +269,28 @@ pub fn publish(pubsub: PubSub(message), group: String, message: message) -> Int
 **Problem**: `process.sleep()` makes tests flaky and slow.
 **Solution**: Use `actor.call()` with reply patterns for synchronous testing.
 
-### 4. **Framework Dependencies in Library Code**
-**Problem**: Using framework-specific logging/utilities prevents library extraction.
-**Solution**: Keep core library modules framework-independent.
+### 4. **Relying on Actor-Level Type Safety**
+**Problem**: Letting actors discard incompatible messages wastes resources and provides false safety.
+**Solution**: Use PubSub-level type safety with tagged syn groups to prevent message delivery entirely.
 
 ### 5. **Not Following Actor Patterns**
 **Problem**: Inventing new patterns instead of following Gleam conventions.
 **Solution**: Study `process.gleam` and follow established `Subject` patterns.
 
-### 6. **Reward Hacking in TDD**
+### 6. **Using io.debug Instead of echo**
+**Problem**: Using `io.debug()` for debugging output when `echo` is the preferred method.
+**Solution**: ALWAYS use `echo` statement for debugging. `echo` is a language keyword that doesn't need imports or parentheses.
+
+```gleam
+// WRONG - Don't use io.debug
+import gleam/io
+let _ = io.debug(#("debugging", value))
+
+// CORRECT - Use echo
+echo #("debugging", value)
+```
+
+### 7. **Reward Hacking in TDD**
 **Problem**: Implementing fake/dummy functionality to make tests "pass" instead of real implementation.
 **Solution**: NEVER replace real logic with comments like "Simplified for testing". Always implement actual functionality or ask for help when stuck.
 
@@ -298,6 +322,7 @@ pub fn whereis(...) -> Result(...) {
 3. **Build incrementally** - Test each piece before adding complexity
 4. **Research FFI carefully** - Read Erlang source, don't guess
 5. **Test distributed scenarios** - Use multiple PubSub instances
+6. **Use consistent MessageType pattern** - Both PubSub and Registry use the same MessageType approach
 
 ### Before Adding Features:
 - [ ] Does this follow existing Gleam patterns?
@@ -316,4 +341,4 @@ pub fn whereis(...) -> Result(...) {
 
 ---
 
-**Remember**: PubSub libraries are fundamentally about **composition** - enabling clean integration of multiple message sources in actor systems. Every design decision should serve that goal.
+**Remember**: Both PubSub and Registry systems are fundamentally about **composition** - enabling clean integration of multiple message sources and process discovery in actor systems. Both use the same MessageType pattern for consistency and type safety. Every design decision should serve that goal.

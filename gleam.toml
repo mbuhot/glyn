@@ -4,7 +4,6 @@ version = "1.0.0"
 licences = ["MIT"]
 repository = { type = "github", user = "mbuhot", repo = "glyn" }
 links = [
-  { title = "Repository", href = "https://github.com/mbuhot/glyn" },
 ]
 
 [dependencies]
