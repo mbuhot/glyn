@@ -3,8 +3,6 @@ import gleam/erlang/atom
 import gleam/erlang/process.{type Pid, type Subject}
 import gleam/string
 
-
-
 // FFI bindings for syn
 @external(erlang, "syn", "add_node_to_scopes")
 fn syn_add_node_to_scopes(scopes: List(atom.Atom)) -> atom.Atom
@@ -34,15 +32,18 @@ fn from_dynamic(value: Dynamic) -> a
 
 // Registry FFI bindings
 @external(erlang, "syn", "register")
-fn syn_register(scope: atom.Atom, name: String, pid: Pid, metadata: metadata) -> Dynamic
+fn syn_register(
+  scope: atom.Atom,
+  name: String,
+  pid: Pid,
+  metadata: metadata,
+) -> Dynamic
 
 @external(erlang, "syn", "lookup")
 fn syn_lookup(scope: atom.Atom, name: String) -> Dynamic
 
 @external(erlang, "syn", "unregister")
 fn syn_unregister(scope: atom.Atom, name: String) -> Dynamic
-
-
 
 // Type-safe PubSub wrapper
 pub opaque type PubSub(message) {
@@ -78,7 +79,8 @@ pub fn subscribe(
   assert atom.create("ok") == syn_join(pubsub.scope, group, subscriber_pid)
 
   // Create a Subject using the shared type_id
-  let subject = process.unsafely_create_subject(subscriber_pid, to_dynamic(pubsub.type_id))
+  let subject =
+    process.unsafely_create_subject(subscriber_pid, to_dynamic(pubsub.type_id))
 
   Subscription(
     pubsub: pubsub,
@@ -90,26 +92,24 @@ pub fn subscribe(
 
 /// Unsubscribe from a PubSub group
 pub fn unsubscribe(subscription: Subscription(message, group)) -> Nil {
-  assert atom.create("ok") == syn_leave(
-    subscription.pubsub.scope,
-    subscription.group,
-    subscription.subscriber_pid,
-  )
+  assert atom.create("ok")
+    == syn_leave(
+      subscription.pubsub.scope,
+      subscription.group,
+      subscription.subscriber_pid,
+    )
   Nil
 }
 
 /// Publish a type-safe message to all subscribers of a group
-pub fn publish(
-  pubsub: PubSub(message),
-  group: group,
-  message: message,
-) -> Int {
+pub fn publish(pubsub: PubSub(message), group: group, message: message) -> Int {
   // Create the tagged message that matches what process.send would create
   // We need to extract the actual type_id value from Dynamic
   let tagged_message = #(to_dynamic(pubsub.type_id), message)
 
   // Publish the tagged message through syn
-  let assert Ok(subscriber_count) = syn_publish(pubsub.scope, group, to_dynamic(tagged_message))
+  let assert Ok(subscriber_count) =
+    syn_publish(pubsub.scope, group, to_dynamic(tagged_message))
   subscriber_count
 }
 
@@ -152,7 +152,13 @@ pub fn register(
 ) -> Result(Registration(message, metadata), String) {
   case process.subject_owner(subject) {
     Ok(pid) -> {
-      let result = syn_register(registry.scope, name, pid, to_dynamic(#(subject, metadata)))
+      let result =
+        syn_register(
+          registry.scope,
+          name,
+          pid,
+          to_dynamic(#(subject, metadata)),
+        )
       case result == to_dynamic(atom.create("ok")) {
         True -> {
           Ok(Registration(
@@ -174,7 +180,9 @@ pub fn register(
 }
 
 /// Unregister a process
-pub fn unregister(registration: Registration(message, metadata)) -> Result(Nil, String) {
+pub fn unregister(
+  registration: Registration(message, metadata),
+) -> Result(Nil, String) {
   let result = syn_unregister(registration.registry.scope, registration.name)
   case result == to_dynamic(atom.create("ok")) {
     True -> Ok(Nil)
@@ -183,7 +191,10 @@ pub fn unregister(registration: Registration(message, metadata)) -> Result(Nil, 
 }
 
 /// Look up a registered process and return a type-safe Subject with metadata
-pub fn lookup(registry: Registry(message, metadata), name: String) -> Result(#(Subject(message), metadata), String) {
+pub fn lookup(
+  registry: Registry(message, metadata),
+  name: String,
+) -> Result(#(Subject(message), metadata), String) {
   let result = syn_lookup(registry.scope, name)
   case result == to_dynamic(atom.create("undefined")) {
     True -> {
@@ -198,7 +209,11 @@ pub fn lookup(registry: Registry(message, metadata), name: String) -> Result(#(S
 }
 
 /// Send a type-safe message to a registered process
-pub fn send_to_registered(registry: Registry(message, metadata), name: String, message: message) -> Result(Nil, String) {
+pub fn send_to_registered(
+  registry: Registry(message, metadata),
+  name: String,
+  message: message,
+) -> Result(Nil, String) {
   case lookup(registry, name) {
     Ok(#(subject, _metadata)) -> {
       process.send(subject, message)

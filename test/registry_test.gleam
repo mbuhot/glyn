@@ -1,7 +1,6 @@
+import gleam/erlang/process.{type Subject}
 import gleeunit
 import glyn
-import gleam/erlang/process.{type Subject}
-
 
 pub fn main() -> Nil {
   gleeunit.main()
@@ -26,7 +25,8 @@ pub fn basic_registration_and_lookup_test() {
   let test_metadata = "service_v1"
 
   // Act: Register the subject
-  let registration_result = glyn.register(registry, "test_service", subject, test_metadata)
+  let registration_result =
+    glyn.register(registry, "test_service", subject, test_metadata)
 
   // Assert: Registration should succeed
   let assert Ok(registration) = registration_result
@@ -62,7 +62,8 @@ pub fn unregister_process_test() {
   let subject = process.new_subject()
   let test_metadata = "unregister_service_v1"
 
-  let assert Ok(registration) = glyn.register(registry, "temp_service", subject, test_metadata)
+  let assert Ok(registration) =
+    glyn.register(registry, "temp_service", subject, test_metadata)
 
   // Verify it exists first
   let assert Ok(_) = glyn.lookup(registry, "temp_service")
@@ -91,13 +92,19 @@ pub fn send_to_registered_test() {
   let test_metadata = "send_service_v1"
 
   // Register the service subject in the registry
-  let assert Ok(_registration) = glyn.register(registry, "message_service", service_subject, test_metadata)
+  let assert Ok(_registration) =
+    glyn.register(registry, "message_service", service_subject, test_metadata)
 
   // Create a reply subject for the message
   let reply_subject = process.new_subject()
 
   // Act: Send a message to the registered process
-  let send_result = glyn.send_to_registered(registry, "message_service", GetStatus(reply_subject))
+  let send_result =
+    glyn.send_to_registered(
+      registry,
+      "message_service",
+      GetStatus(reply_subject),
+    )
 
   // Assert: Send should succeed
   let assert Ok(_) = send_result
@@ -114,7 +121,8 @@ pub fn send_to_registered_test() {
   assert status_reply == "service_active"
 
   // Test error case: send to non-existent process
-  let error_result = glyn.send_to_registered(registry, "non_existent_service", Shutdown)
+  let error_result =
+    glyn.send_to_registered(registry, "non_existent_service", Shutdown)
 
   // Assert: Should return an error
   let assert Error(error_message) = error_result

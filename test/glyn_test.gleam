@@ -1,8 +1,8 @@
+import gleam/erlang/process.{type Subject}
+import gleam/list
+import gleam/otp/actor
 import gleeunit
 import glyn
-import gleam/erlang/process.{type Subject}
-import gleam/otp/actor
-import gleam/list
 
 pub fn main() -> Nil {
   gleeunit.main()
@@ -205,7 +205,8 @@ pub fn actor_pubsub_integration_test() {
 
   // Check actor received the message
   let count = actor.call(actor_subject, waiting: 1000, sending: GetMessageCount)
-  let last_msg = actor.call(actor_subject, waiting: 1000, sending: GetLastMessage)
+  let last_msg =
+    actor.call(actor_subject, waiting: 1000, sending: GetLastMessage)
 
   assert count == 1
   assert last_msg == "Alice joined"
@@ -213,8 +214,10 @@ pub fn actor_pubsub_integration_test() {
   // Publish another message
   let _ = glyn.publish(pubsub, "general", Message("Alice", "Hello everyone!"))
 
-  let count2 = actor.call(actor_subject, waiting: 1000, sending: GetMessageCount)
-  let last_msg2 = actor.call(actor_subject, waiting: 1000, sending: GetLastMessage)
+  let count2 =
+    actor.call(actor_subject, waiting: 1000, sending: GetMessageCount)
+  let last_msg2 =
+    actor.call(actor_subject, waiting: 1000, sending: GetLastMessage)
 
   assert count2 == 2
   assert last_msg2 == "Alice: Hello everyone!"
@@ -276,7 +279,8 @@ pub fn group_isolation_test() {
   let _ = actor.call(actor2, waiting: 1000, sending: GetReady)
 
   // Publish to "general" group only
-  let reached = glyn.publish(pubsub, "general", Message("Charlie", "Hello general!"))
+  let reached =
+    glyn.publish(pubsub, "general", Message("Charlie", "Hello general!"))
   assert reached == 1
 
   // Only actor1 should have received the message
@@ -287,15 +291,18 @@ pub fn group_isolation_test() {
   assert count2 == 0
 
   // Publish to "private" group
-  let reached2 = glyn.publish(pubsub, "private", Message("Diana", "Hello private!"))
+  let reached2 =
+    glyn.publish(pubsub, "private", Message("Diana", "Hello private!"))
   assert reached2 == 1
 
   // Now actor2 should have a message
   let count1_after = actor.call(actor1, waiting: 1000, sending: GetMessageCount)
   let count2_after = actor.call(actor2, waiting: 1000, sending: GetMessageCount)
 
-  assert count1_after == 1  // Still 1
-  assert count2_after == 1  // Now has 1
+  assert count1_after == 1
+  // Still 1
+  assert count2_after == 1
+  // Now has 1
 
   // Clean up
   actor.send(actor1, ChatActorShutdown)
@@ -306,7 +313,8 @@ pub fn group_isolation_test() {
 pub fn type_safety_test() {
   // Different scopes for different message types
   let chat_pubsub = glyn.new(scope: "type_test_chat", type_id: "ChatMessage_v4")
-  let metric_pubsub = glyn.new(scope: "type_test_metrics", type_id: "MetricEvent_v1")
+  let metric_pubsub =
+    glyn.new(scope: "type_test_metrics", type_id: "MetricEvent_v1")
 
   // Start actors with different message types
   let assert Ok(chat_started) = start_chat_actor(chat_pubsub, "general")
@@ -320,17 +328,22 @@ pub fn type_safety_test() {
   let _ = actor.call(metric_actor, waiting: 1000, sending: GetMetricReady)
 
   // Publish chat message
-  let chat_reached = glyn.publish(chat_pubsub, "general", Message("Eve", "Hello!"))
+  let chat_reached =
+    glyn.publish(chat_pubsub, "general", Message("Eve", "Hello!"))
   assert chat_reached == 1
 
   // Publish metric event
-  let metric_reached = glyn.publish(metric_pubsub, "counters", CounterIncrement("requests", 5))
+  let metric_reached =
+    glyn.publish(metric_pubsub, "counters", CounterIncrement("requests", 5))
   assert metric_reached == 1
 
   // Check each actor only received its own message type
-  let chat_count = actor.call(chat_actor, waiting: 1000, sending: GetMessageCount)
-  let metric_count = actor.call(metric_actor, waiting: 1000, sending: GetMetricCount)
-  let total_count = actor.call(metric_actor, waiting: 1000, sending: GetTotalCount)
+  let chat_count =
+    actor.call(chat_actor, waiting: 1000, sending: GetMessageCount)
+  let metric_count =
+    actor.call(metric_actor, waiting: 1000, sending: GetMetricCount)
+  let total_count =
+    actor.call(metric_actor, waiting: 1000, sending: GetTotalCount)
 
   assert chat_count == 1
   assert metric_count == 1
@@ -344,8 +357,10 @@ pub fn type_safety_test() {
 // Test distributed consistency - same type_id across instances
 pub fn distributed_consistency_test() {
   // Create two PubSub instances with same scope and type_id (simulating different nodes)
-  let pubsub1 = glyn.new(scope: "distributed_scope", type_id: "ChatMessage_distributed")
-  let pubsub2 = glyn.new(scope: "distributed_scope", type_id: "ChatMessage_distributed")
+  let pubsub1 =
+    glyn.new(scope: "distributed_scope", type_id: "ChatMessage_distributed")
+  let pubsub2 =
+    glyn.new(scope: "distributed_scope", type_id: "ChatMessage_distributed")
 
   // Start actor subscribed to first instance
   let assert Ok(started) = start_chat_actor(pubsub1, "global")
@@ -360,7 +375,8 @@ pub fn distributed_consistency_test() {
 
   // Actor should have received the message
   let count = actor.call(actor_subject, waiting: 1000, sending: GetMessageCount)
-  let last_msg = actor.call(actor_subject, waiting: 1000, sending: GetLastMessage)
+  let last_msg =
+    actor.call(actor_subject, waiting: 1000, sending: GetLastMessage)
 
   assert count == 1
   assert last_msg == "Frank joined"
@@ -371,13 +387,16 @@ pub fn distributed_consistency_test() {
 
 // Test complex message flow with multiple message types
 pub fn complex_message_flow_test() {
-  let chat_pubsub = glyn.new(scope: "complex_chat", type_id: "ChatMessage_complex")
-  let metric_pubsub = glyn.new(scope: "complex_metrics", type_id: "MetricEvent_complex")
+  let chat_pubsub =
+    glyn.new(scope: "complex_chat", type_id: "ChatMessage_complex")
+  let metric_pubsub =
+    glyn.new(scope: "complex_metrics", type_id: "MetricEvent_complex")
 
   // Start multiple actors
   let assert Ok(chat1_started) = start_chat_actor(chat_pubsub, "room1")
   let assert Ok(chat2_started) = start_chat_actor(chat_pubsub, "room2")
-  let assert Ok(metric_started) = start_metric_actor(metric_pubsub, "app_metrics")
+  let assert Ok(metric_started) =
+    start_metric_actor(metric_pubsub, "app_metrics")
 
   let chat1 = chat1_started.data
   let chat2 = chat2_started.data
@@ -392,8 +411,10 @@ pub fn complex_message_flow_test() {
   let _ = glyn.publish(chat_pubsub, "room1", UserJoined("Grace"))
   let _ = glyn.publish(chat_pubsub, "room1", Message("Grace", "Hello room 1!"))
   let _ = glyn.publish(chat_pubsub, "room2", UserJoined("Henry"))
-  let _ = glyn.publish(metric_pubsub, "app_metrics", CounterIncrement("logins", 2))
-  let _ = glyn.publish(metric_pubsub, "app_metrics", GaugeUpdate("cpu_usage", 75.5))
+  let _ =
+    glyn.publish(metric_pubsub, "app_metrics", CounterIncrement("logins", 2))
+  let _ =
+    glyn.publish(metric_pubsub, "app_metrics", GaugeUpdate("cpu_usage", 75.5))
 
   // Check final states
   let chat1_count = actor.call(chat1, waiting: 1000, sending: GetMessageCount)
@@ -401,10 +422,14 @@ pub fn complex_message_flow_test() {
   let metric_count = actor.call(metrics, waiting: 1000, sending: GetMetricCount)
   let total_count = actor.call(metrics, waiting: 1000, sending: GetTotalCount)
 
-  assert chat1_count == 2  // Grace joined + Grace's message
-  assert chat2_count == 1  // Henry joined
-  assert metric_count == 2  // login counter + cpu gauge
-  assert total_count == 2   // only counter increment adds to total
+  assert chat1_count == 2
+  // Grace joined + Grace's message
+  assert chat2_count == 1
+  // Henry joined
+  assert metric_count == 2
+  // login counter + cpu gauge
+  assert total_count == 2
+  // only counter increment adds to total
 
   let chat1_last = actor.call(chat1, waiting: 1000, sending: GetLastMessage)
   let chat2_last = actor.call(chat2, waiting: 1000, sending: GetLastMessage)
@@ -420,7 +445,8 @@ pub fn complex_message_flow_test() {
 
 // Test subscriber count with real actors
 pub fn actor_subscriber_count_test() {
-  let pubsub = glyn.new(scope: "subscriber_count_test", type_id: "ChatMessage_count")
+  let pubsub =
+    glyn.new(scope: "subscriber_count_test", type_id: "ChatMessage_count")
 
   // Initially no subscribers
   let initial_count = glyn.subscribers(pubsub, "test_room") |> list.length
@@ -452,8 +478,10 @@ pub fn actor_subscriber_count_test() {
   actor.send(actor_subject, ChatActorShutdown)
 
   // Verify we can still communicate with the remaining actor
-  let final_count = actor.call(actor2_subject, waiting: 1000, sending: GetMessageCount)
-  assert final_count == 0  // Should still be 0 since no messages were sent
+  let final_count =
+    actor.call(actor2_subject, waiting: 1000, sending: GetMessageCount)
+  assert final_count == 0
+  // Should still be 0 since no messages were sent
 
   // Clean up remaining actor
   actor.send(actor2_subject, ChatActorShutdown)
