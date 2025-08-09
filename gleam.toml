@@ -1,10 +1,10 @@
 name = "glyn"
 version = "1.0.0"
+description = "Type-safe PubSub and Registry for Gleam actors with distributed clustering support"
 
 licences = ["MIT"]
 repository = { type = "github", user = "mbuhot", repo = "glyn" }
-links = [
-]
+links = []
 
 [dependencies]
 gleam_stdlib = ">= 0.44.0 and < 2.0.0"
