@@ -92,7 +92,10 @@ pub type Subscription(message, group) {
 
 /// Create a new type-safe PubSub system with a message type for deterministic type identification
 /// The message_type should be a MessageType that uniquely identifies the message type
-pub fn new(scope scope: String, message_type message_type: MessageType(message)) -> PubSub(message) {
+pub fn new(
+  scope scope: String,
+  message_type message_type: MessageType(message),
+) -> PubSub(message) {
   let scope = atom.create(scope)
   syn_add_node_to_scopes([scope])
   PubSub(scope: scope, tag: phash2(message_type.id))
@@ -105,7 +108,8 @@ pub fn subscribe(
   subscriber_pid: Pid,
 ) -> Subscription(message, group) {
   let tagged_group = #(group, pubsub.tag)
-  assert atom.create("ok") == syn_join(pubsub.scope, tagged_group, subscriber_pid)
+  assert atom.create("ok")
+    == syn_join(pubsub.scope, tagged_group, subscriber_pid)
 
   // Create a Subject using the shared tag
   let subject =

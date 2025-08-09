@@ -23,8 +23,13 @@ pub type MetricEvent {
 }
 
 // Message type constants - these create a compile-time association with message types
-pub const chat_message_type: glyn.MessageType(ChatMessage) = glyn.MessageType("ChatMessage_v1")
-pub const metric_event_type: glyn.MessageType(MetricEvent) = glyn.MessageType("MetricEvent_v1")
+pub const chat_message_type: glyn.MessageType(ChatMessage) = glyn.MessageType(
+  "ChatMessage_v1",
+)
+
+pub const metric_event_type: glyn.MessageType(MetricEvent) = glyn.MessageType(
+  "MetricEvent_v1",
+)
 
 pub type ChatActorMessage {
   // Direct actor commands
@@ -174,7 +179,8 @@ fn start_metric_actor(
 }
 
 pub fn actor_pubsub_integration_test() {
-  let pubsub = pubsub.new(scope: "chat_test_scope", message_type: chat_message_type)
+  let pubsub =
+    pubsub.new(scope: "chat_test_scope", message_type: chat_message_type)
 
   // Start actor
   let assert Ok(started) = start_chat_actor(pubsub, "general")
@@ -199,11 +205,11 @@ pub fn actor_pubsub_integration_test() {
 
   // Shutdown actor
   actor.send(actor_subject, ChatActorShutdown)
-
 }
 
 pub fn multiple_actors_test() {
-  let pubsub = pubsub.new(scope: "multi_chat_scope", message_type: chat_message_type)
+  let pubsub =
+    pubsub.new(scope: "multi_chat_scope", message_type: chat_message_type)
 
   // Start multiple actors
   let assert Ok(started1) = start_chat_actor(pubsub, "general")
@@ -220,8 +226,7 @@ pub fn multiple_actors_test() {
   let _ = actor.call(actor3, waiting: 1000, sending: GetReady)
 
   // Publish a message - should reach all 3 actors
-  let subscriber_count =
-    pubsub.publish(pubsub, "general", UserJoined("bob"))
+  let subscriber_count = pubsub.publish(pubsub, "general", UserJoined("bob"))
   assert subscriber_count == 3
 
   // Verify all actors received the message
@@ -237,11 +242,11 @@ pub fn multiple_actors_test() {
   actor.send(actor1, ChatActorShutdown)
   actor.send(actor2, ChatActorShutdown)
   actor.send(actor3, ChatActorShutdown)
-
 }
 
 pub fn group_isolation_test() {
-  let pubsub = pubsub.new(scope: "group_test_scope", message_type: chat_message_type)
+  let pubsub =
+    pubsub.new(scope: "group_test_scope", message_type: chat_message_type)
 
   // Start actors in different groups
   let assert Ok(started1) = start_chat_actor(pubsub, "general")
@@ -268,8 +273,10 @@ pub fn group_isolation_test() {
   let count1 = actor.call(actor1, waiting: 1000, sending: GetMessageCount)
   let count2 = actor.call(actor2, waiting: 1000, sending: GetMessageCount)
 
-  assert count1 == 1 // Only got general message
-  assert count2 == 1 // Only got private message
+  assert count1 == 1
+  // Only got general message
+  assert count2 == 1
+  // Only got private message
 
   let last1 = actor.call(actor1, waiting: 1000, sending: GetLastMessage)
   let last2 = actor.call(actor2, waiting: 1000, sending: GetLastMessage)
@@ -280,12 +287,12 @@ pub fn group_isolation_test() {
   // Shutdown actors
   actor.send(actor1, ChatActorShutdown)
   actor.send(actor2, ChatActorShutdown)
-
 }
 
 pub fn type_safety_test() {
   // Different scopes for different message types
-  let chat_pubsub = pubsub.new(scope: "type_test_chat", message_type: chat_message_type)
+  let chat_pubsub =
+    pubsub.new(scope: "type_test_chat", message_type: chat_message_type)
   let metric_pubsub =
     pubsub.new(scope: "type_test_metrics", message_type: metric_event_type)
 
@@ -310,20 +317,22 @@ pub fn type_safety_test() {
   assert metric_count == 1
 
   // Verify correct isolation
-  let chat_messages = actor.call(chat_actor, waiting: 1000, sending: GetMessageCount)
-  let metric_messages = actor.call(metric_actor, waiting: 1000, sending: GetMetricCount)
+  let chat_messages =
+    actor.call(chat_actor, waiting: 1000, sending: GetMessageCount)
+  let metric_messages =
+    actor.call(metric_actor, waiting: 1000, sending: GetMetricCount)
 
   assert chat_messages == 1
   assert metric_messages == 1
 
   // Verify totals (metric actor adds counter values to total)
-  let total_count = actor.call(metric_actor, waiting: 1000, sending: GetTotalCount)
+  let total_count =
+    actor.call(metric_actor, waiting: 1000, sending: GetTotalCount)
   assert total_count == 5
 
   // Shutdown actors
   actor.send(chat_actor, ChatActorShutdown)
   actor.send(metric_actor, MetricActorShutdown)
-
 }
 
 pub fn distributed_consistency_test() {
@@ -342,7 +351,11 @@ pub fn distributed_consistency_test() {
 
   // Publish from second instance - should reach subscriber on first instance
   let subscriber_count =
-    pubsub.publish(pubsub2, "global", Message("distributed", "cross-node message"))
+    pubsub.publish(
+      pubsub2,
+      "global",
+      Message("distributed", "cross-node message"),
+    )
   assert subscriber_count == 1
 
   // Verify actor received the message
@@ -352,7 +365,6 @@ pub fn distributed_consistency_test() {
 
   // Shutdown actor
   actor.send(actor_subject, ChatActorShutdown)
-
 }
 
 pub fn complex_message_flow_test() {
@@ -407,21 +419,28 @@ pub fn complex_message_flow_test() {
   assert metric_count3 == 1
 
   // Verify final message counts
-  let chat1_messages = actor.call(chat1_actor, waiting: 1000, sending: GetMessageCount)
-  let chat2_messages = actor.call(chat2_actor, waiting: 1000, sending: GetMessageCount)
-  let metric_messages = actor.call(metric_actor, waiting: 1000, sending: GetMetricCount)
-  let total_count = actor.call(metric_actor, waiting: 1000, sending: GetTotalCount)
+  let chat1_messages =
+    actor.call(chat1_actor, waiting: 1000, sending: GetMessageCount)
+  let chat2_messages =
+    actor.call(chat2_actor, waiting: 1000, sending: GetMessageCount)
+  let metric_messages =
+    actor.call(metric_actor, waiting: 1000, sending: GetMetricCount)
+  let total_count =
+    actor.call(metric_actor, waiting: 1000, sending: GetTotalCount)
 
-  assert chat1_messages == 3 // UserJoined + 2 Messages
-  assert chat2_messages == 2 // UserJoined + 1 Message
-  assert metric_messages == 3 // CounterIncrement + GaugeUpdate + TimerRecord
-  assert total_count == 152 // 2 + 0 + 150 (CounterIncrement + GaugeUpdate + TimerRecord)
+  assert chat1_messages == 3
+  // UserJoined + 2 Messages
+  assert chat2_messages == 2
+  // UserJoined + 1 Message
+  assert metric_messages == 3
+  // CounterIncrement + GaugeUpdate + TimerRecord
+  assert total_count == 152
+  // 2 + 0 + 150 (CounterIncrement + GaugeUpdate + TimerRecord)
 
   // Shutdown actors
   actor.send(chat1_actor, ChatActorShutdown)
   actor.send(chat2_actor, ChatActorShutdown)
   actor.send(metric_actor, MetricActorShutdown)
-
 }
 
 pub fn actor_subscriber_count_test() {
@@ -463,13 +482,14 @@ pub fn actor_subscriber_count_test() {
   // Shutdown actors
   actor.send(actor_subject, ChatActorShutdown)
   actor.send(actor2_subject, ChatActorShutdown)
-
 }
 
 pub fn pubsub_type_safety_violation_test() {
   // Create two PubSub instances with same scope but different type IDs
-  let chat_pubsub = pubsub.new(scope: "type_violation_scope", message_type: chat_message_type)
-  let metric_pubsub = pubsub.new(scope: "type_violation_scope", message_type: metric_event_type)
+  let chat_pubsub =
+    pubsub.new(scope: "type_violation_scope", message_type: chat_message_type)
+  let metric_pubsub =
+    pubsub.new(scope: "type_violation_scope", message_type: metric_event_type)
 
   // Start a chat actor subscribed to chat messages
   let assert Ok(started) = start_chat_actor(chat_pubsub, "mixed_channel")
@@ -496,14 +516,18 @@ pub fn pubsub_type_safety_violation_test() {
 
   // Now publish a chat message - should reach the chat actor
   let chat_reached =
-    pubsub.publish(chat_pubsub, "mixed_channel", Message("alice", "real message"))
+    pubsub.publish(
+      chat_pubsub,
+      "mixed_channel",
+      Message("alice", "real message"),
+    )
   assert chat_reached == 1
 
   // Verify chat actor received the chat message
-  let final_count = actor.call(chat_actor, waiting: 1000, sending: GetMessageCount)
+  let final_count =
+    actor.call(chat_actor, waiting: 1000, sending: GetMessageCount)
   assert final_count == 1
 
   // Shutdown actor
   actor.send(chat_actor, ChatActorShutdown)
-
 }

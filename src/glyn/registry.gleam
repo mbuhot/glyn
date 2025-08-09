@@ -102,7 +102,10 @@ pub type Registration(message, metadata) {
 
 /// Create a new Registry system for a given scope
 /// The message_type should be a MessageType that uniquely identifies the message type
-pub fn new(scope scope: String, message_type message_type: MessageType(message)) -> Registry(message, metadata) {
+pub fn new(
+  scope scope: String,
+  message_type message_type: MessageType(message),
+) -> Registry(message, metadata) {
   let scope = atom.create(scope)
   syn_add_node_to_scopes([scope])
   Registry(scope: scope, tag: phash2(message_type.id))
