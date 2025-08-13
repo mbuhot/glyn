@@ -206,7 +206,6 @@ pub fn type_safety_through_scopes_test() {
 
   let assert Ok(_) =
     registry.send(system_registry, "shared_name", decode_utils.StopSystem)
-
   // Test passes if both sends succeed, proving scope isolation works
 }
 
@@ -292,7 +291,6 @@ pub fn distributed_behavior_simulation_test() {
       "distributed_service",
       decode_utils.GetStatus(process.new_subject()),
     )
-
   // Test passes if cross-node send succeeds, proving distributed behavior
 }
 
