@@ -124,6 +124,9 @@ pub fn multiple_subscribers_test() {
       decode_utils.AdminMessage("decode_error"),
     )
 
+  // Create confirmation subject to receive results from spawned processes
+  let confirmation_subject = process.new_subject()
+
   // Create first subscriber process
   let _subscriber1_pid =
     process.spawn(fn() {
@@ -136,10 +139,10 @@ pub fn multiple_subscribers_test() {
           |> process.map_selector(PubSubEvent),
         )
 
-      // Wait for message
-      let assert Ok(PubSubEvent(decode_utils.AdminMessage(
-        "System maintenance in 5 minutes",
-      ))) = process.selector_receive(selector, 1000)
+      // Wait for message and confirm receipt
+      let assert Ok(PubSubEvent(decode_utils.AdminMessage(received_msg))) =
+        process.selector_receive(selector, 1000)
+      process.send(confirmation_subject, #("subscriber1", received_msg))
     })
 
   // Create second subscriber process
@@ -154,10 +157,10 @@ pub fn multiple_subscribers_test() {
           |> process.map_selector(PubSubEvent),
         )
 
-      // Wait for message
-      let assert Ok(PubSubEvent(decode_utils.AdminMessage(
-        "System maintenance in 5 minutes",
-      ))) = process.selector_receive(selector, 1000)
+      // Wait for message and confirm receipt
+      let assert Ok(PubSubEvent(decode_utils.AdminMessage(received_msg))) =
+        process.selector_receive(selector, 1000)
+      process.send(confirmation_subject, #("subscriber2", received_msg))
     })
 
   // Give processes time to subscribe
@@ -170,8 +173,11 @@ pub fn multiple_subscribers_test() {
   // Assert: Should reach 2 subscribers
   assert subscriber_count == 2
 
-  // Both processes should complete successfully (if they panic, the test fails)
-  Nil
+  // Receive confirmations from both processes
+  let assert Ok(#("subscriber1", "System maintenance in 5 minutes")) =
+    process.receive(confirmation_subject, 1000)
+  let assert Ok(#("subscriber2", "System maintenance in 5 minutes")) =
+    process.receive(confirmation_subject, 1000)
 }
 
 // Test group isolation (messages to different groups don't interfere)
@@ -284,12 +290,11 @@ pub fn type_safety_through_scopes_test() {
   let command_subject = process.new_subject()
   let _base_selector =
     process.new_selector() |> process.select_map(command_subject, DirectCommand)
-
-  // Subscribe to both with same group name but different scopes
-  let _chat_selector = pubsub.subscribe(chat_pubsub, "shared_name")
-
-  let _metrics_selector = pubsub.subscribe(metrics_pubsub, "shared_name")
   // Same name, different scope
+
+  // Create selectors to receive messages
+  let chat_selector = pubsub.subscribe(chat_pubsub, "shared_name")
+  let metrics_selector = pubsub.subscribe(metrics_pubsub, "shared_name")
 
   // Act: Publish to both scopes with same group name
   let assert Ok(chat_count) =
@@ -310,8 +315,11 @@ pub fn type_safety_through_scopes_test() {
   assert chat_count == 1
   assert metrics_count == 1
 
-  // Both should succeed without interference
-  Nil
+  // Verify messages are received in correct scopes
+  let assert Ok(decode_utils.Message("user", "hello")) =
+    process.selector_receive(chat_selector, 100)
+  let assert Ok(decode_utils.GaugeUpdate("cpu", 0.75)) =
+    process.selector_receive(metrics_selector, 100)
 }
 
 // Test unsubscribe functionality

@@ -156,14 +156,6 @@ pub fn multi_channel_actor_composition_test() {
   }
 }
 
-// Test decode error handling
-// TODO: Implement once we have a way to send raw dynamic messages for testing
-// pub fn decode_error_handling_test() {
-//   // This test requires access to registry internals for sending raw messages
-//   // Will be implemented in integration tests
-//   Nil
-// }
-
 // Test type safety through different scopes and decoders
 pub fn type_safety_through_scopes_test() {
   // Arrange: Create two registries with different decoders in same scope
@@ -215,8 +207,7 @@ pub fn type_safety_through_scopes_test() {
   let assert Ok(_) =
     registry.send(system_registry, "shared_name", decode_utils.StopSystem)
 
-  // Both should succeed without interference
-  Nil
+  // Test passes if both sends succeed, proving scope isolation works
 }
 
 // Test registry operations (send, call, whereis, unregister)
@@ -302,8 +293,7 @@ pub fn distributed_behavior_simulation_test() {
       decode_utils.GetStatus(process.new_subject()),
     )
 
-  // This proves distributed behavior works
-  Nil
+  // Test passes if cross-node send succeeds, proving distributed behavior
 }
 
 // Test error handling for non-existent processes
