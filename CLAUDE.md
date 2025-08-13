@@ -255,6 +255,26 @@ let count = glyn.subscribers(pubsub, group) |> list.length
 pub fn publish(pubsub: PubSub(message), group: String, message: message) -> Int
 ```
 
+## Documentation Guidelines
+
+### What NOT to Include in Module-Level Docs
+
+**Don't include "## Core API" sections**:
+- The documentation generator already lists all public functions
+- Repeating the API in module docs creates redundancy and maintenance burden
+- Focus on usage patterns and examples instead
+
+**Don't include "## Key Features" sections**:
+- This reads like marketing copy, not technical documentation
+- Users can infer features from examples and function signatures
+- Keep module docs focused on practical usage
+
+**Do include**:
+- Integration patterns showing how modules work together
+- Complete working examples
+- Important concepts and design decisions
+- Common usage scenarios
+
 ## Common Pitfalls
 
 ### 1. **Reusing Scope + MessageType**

@@ -7,11 +7,11 @@
 
 Built on the Erlang [syn](https://github.com/ostinelli/syn) library.
 
-
 Glyn provides two complementary systems for actor communication:
 - **PubSub**: Broadcast events to multiple subscribers
 - **Registry**: Direct command routing to named processes
 
+Both systems integrate seamlessly with Gleam's actor model using selector composition patterns.
 
 ## Installation
 
@@ -19,126 +19,228 @@ Glyn provides two complementary systems for actor communication:
 gleam add glyn
 ```
 
+## Creating Message Types and Decoders
+
+First, define your message types and corresponding decoder functions.
+Explicit decoders are required to ensure messages sent between nodes in a cluster are handled with type safety.
+Note the Glyn does not JSON encode messages, they are sent directly as erlang terms and should be decoded from tuples.
+
+```gleam
+// my_app/orders.gleam
+import gleam/dynamic.{type Dynamic}
+import gleam/dynamic/decode
+import gleam/erlang/process.{type Subject}
+
+// Define your message types
+pub type Event {
+  OrderCreated(id: String, amount: Int)
+  OrderShipped(id: String, tracking: String)
+  SystemAlert(message: String)
+}
+
+pub type Command {
+  ProcessOrder(id: String, reply_with: Subject(Bool))
+  GetStatus(reply_with: Subject(String))
+  Shutdown
+}
+
+// Helper for decoding record tags
+fn expect_atom(expected: String) -> decode.Decoder(atom.Atom) {
+  use value <- decode.then(atom.decoder())
+  case atom.to_string(value) == expected {
+    True -> decode.success(value)
+    False -> decode.failure(value, "Expected atom: " <> expected)
+  }
+}
+
+// Helper function to match specific atoms
+fn expect_atom(expected: String) -> decode.Decoder(atom.Atom) {
+  use value <- decode.then(atom.decoder())
+  case atom.to_string(value) == expected {
+    True -> decode.success(value)
+    False -> decode.failure(value, "Expected atom: " <> expected)
+  }
+}
+
+// Unsafe cast for Subject decoding - use with caution
+@external(erlang, "gleam_stdlib", "identity")
+fn unsafe_cast_subject(value: Dynamic) -> Subject(a)
+
+// Create decoder functions
+pub fn event_decoder() -> decode.Decoder(Event) {
+  decode.one_of(
+    {
+      use _ <- decode.field(0, expect_atom("order_created"))
+      use id <- decode.field(1, decode.string)
+      use amount <- decode.field(2, decode.int)
+      decode.success(OrderCreated(id, amount))
+    },
+    or: [
+      {
+        use _ <- decode.field(0, expect_atom("order_shipped"))
+        use id <- decode.field(1, decode.string)
+        use tracking <- decode.field(2, decode.string)
+        decode.success(OrderShipped(id, tracking))
+      },
+      {
+        use _ <- decode.field(0, expect_atom("system_alert"))
+        use message <- decode.field(1, decode.string)
+        decode.success(SystemAlert(message))
+      },
+    ]
+  )
+}
+
+pub fn command_decoder() -> decode.Decoder(Command) {
+  decode.one_of(
+    // Shutdown is a simple variant - encoded as bare atom
+    decode.map(expect_atom("shutdown"), fn(_) { Shutdown }),
+    or: [
+      // ProcessOrder has data - encoded as tuple
+      {
+        use _ <- decode.field(0, expect_atom("process_order"))
+        use id <- decode.field(1, decode.string)
+        use reply_with <- decode.field(2, decode.dynamic)
+        decode.success(ProcessOrder(id, unsafe_cast_subject(reply_with)))
+      },
+      // GetStatus has data - encoded as tuple
+      {
+        use _ <- decode.field(0, expect_atom("get_status"))
+        use reply_with <- decode.field(1, decode.dynamic)
+        decode.success(GetStatus(unsafe_cast_subject(reply_with)))
+      },
+    ]
+  )
+}
+```
+
 ## Quick Example: PubSub
 
 ```gleam
-import glyn
 import glyn/pubsub
+import my_app/orders
 import gleam/erlang/process
 
-// Define your event type
-pub type OrderEvent {
-  OrderCreated(id: String, amount: Int)
-  OrderShipped(id: String, tracking: String)
-  OrderCancelled(id: String, reason: String)
-}
-
-// Create a MessageType for compile-time safety
-pub const order_event_type: glyn.MessageType(OrderEvent) = glyn.MessageType("OrderEvent_v1")
-
 pub fn main() {
-  // Create PubSub system
-  let pubsub = pubsub.new(scope: "orders", message_type: order_event_type)
-  
-  // Subscribe to events
-  let subscription = pubsub.subscribe(pubsub, "processing", process.self())
-  
-  // Publish events (returns number of subscribers reached)
-  let reached = pubsub.publish(pubsub, "processing", OrderCreated("ORDER123", 99))
+  // Create PubSub system with decoder and error default
+  let pubsub = pubsub.new(
+    "orders",
+    orders.event_decoder(),
+    orders.SystemAlert("decode_error")
+  )
+
+  // Subscribe returns a Selector that can be composed
+  let selector =
+    process.new_selector()
+    |> process.merge_selector(
+      pubsub.subscribe(pubsub, "processing")
+      |> process.map_selector(OrderEvent)
+    )
+
+  // Publish events (returns Result(Int, PubSubError) with subscriber count)
+  let assert Ok(reached) = pubsub.publish(pubsub, "processing",
+    orders.OrderCreated("ORDER123", 99))
   // reached == 1
+
+  // Receive messages through selector
+  let assert Ok(OrderEvent(orders.OrderCreated(id, amount))) =
+    process.selector_receive(selector, 100)
 }
 ```
 
 ## Quick Example: Registry
 
 ```gleam
-import glyn
 import glyn/registry
+import my_app/orders  // Using same orders module from above
 import gleam/erlang/process.{type Subject}
 
-// Define your command type
-pub type UserCommand {
-  GetProfile(reply_with: Subject(String))
-  UpdateEmail(email: String, reply_with: Subject(Bool))
-}
-
-// Create a MessageType for compile-time safety  
-pub const user_command_type: glyn.MessageType(UserCommand) = glyn.MessageType("UserCommand_v1")
-
 pub fn main() {
-  // Create Registry system
-  let registry = registry.new(scope: "users", message_type: user_command_type)
-  
-  // Register a process under a name
-  let user_subject = process.new_subject()
-  let assert Ok(_registration) = registry.register(registry, "user_123", user_subject, "active")
-  
+  // Create Registry system with decoder and error default
+  let registry = registry.new(
+    "orders",
+    orders.command_decoder(),
+    orders.Shutdown
+  )
+
+  // Register returns a Selector for receiving commands
+  let assert Ok(command_selector) = registry.register(registry, "order_processor", "v1.0")
+
+  // Compose with other selectors
+  let selector =
+    process.new_selector()
+    |> process.merge_selector(
+      process.map_selector(command_selector, UserCommand)
+    )
+
   // Send commands to registered processes
-  let reply_subject = process.new_subject()
-  let assert Ok(_) = registry.send(registry, "user_123", GetProfile(reply_subject))
-  
+  let assert Ok(_) = registry.send(registry, "order_processor",
+    orders.ProcessOrder("ORDER123", process.new_subject()))
+
   // Or use call for request/reply pattern
-  let assert Ok(profile) = registry.call(registry, "user_123", waiting: 1000, sending: GetProfile)
+  let assert Ok(status) = registry.call(registry, "order_processor", waiting: 1000,
+    sending: fn(reply) { orders.GetStatus(reply) })
 }
 ```
 
-## Integration Pattern: Actor with Both PubSub and Registry
+## Multi-Channel Actor Integration
 
-The real power of Glyn comes from combining both systems in a single Gleam actor:
+The real power of Gleam's typed actor system comes from composing multiple message channels in a single actor:
 
 ```gleam
-import glyn
 import glyn/pubsub
 import glyn/registry
+import my_app/orders  // Using the orders module we defined above
 import gleam/erlang/process.{type Subject}
 import gleam/otp/actor
 
-// Separate command and event types for clean separation of concerns
-pub type Command {
-  ProcessOrder(id: String, reply_with: Subject(Bool))
-  GetStatus(reply_with: Subject(String))
-}
-
-pub type Event {
-  OrderCreated(id: String, amount: Int)
-  PaymentProcessed(id: String)
-  SystemAlert(message: String)
-}
-
-// Actor message type that composes both
+// Actor message type that composes multiple channels
 pub type ProcessorMessage {
-  CommandMessage(Command)
-  PubSubMessage(Event)
+  DirectCommand(DirectMessage)  // Direct actor commands
+  OrderCommand(orders.Command)  // Registry commands
+  OrderEvent(orders.Event)      // PubSub events
+  Shutdown
 }
 
-// MessageTypes for each system
-pub const command_type: glyn.MessageType(Command) = glyn.MessageType("Command_v1")
-pub const event_type: glyn.MessageType(Event) = glyn.MessageType("Event_v1")
+pub type DirectMessage {
+  GetStats(reply_with: Subject(String))
+  Reset
+}
 
 pub fn start_order_processor() {
-  // Create both systems
-  let event_pubsub = pubsub.new(scope: "events", message_type: event_type)
-  let command_registry = registry.new(scope: "commands", message_type: command_type)
-
   actor.new_with_initialiser(5000, fn(subject) {
-    // Subscribe to events
-    let event_subscription = pubsub.subscribe(event_pubsub, "orders", process.self())
-    
-    // Create command subject and register it
-    let command_subject = process.new_subject()
-    let assert Ok(_) = registry.register(command_registry, "order_processor", command_subject, "v1.0")
+    // Create PubSub and Registry systems
+    let event_pubsub = pubsub.new(
+      "events",
+      orders.event_decoder(),
+      orders.SystemAlert("event_decode_error")
+    )
 
-    // Compose messages using selector
+    let command_registry = registry.new(
+      "commands",
+      orders.command_decoder(),
+      orders.Shutdown
+    )
+
+    // Get selectors from both systems
+    let event_selector = pubsub.subscribe(event_pubsub, "orders")
+    let assert Ok(command_selector) = registry.register(command_registry, "order_processor", "v1.0")
+
+    // Create direct command channel
+    let direct_subject = process.new_subject()
+
+    // Compose all channels using selectors
     let selector =
       process.new_selector()
       |> process.select(subject)
-      |> process.select_map(command_subject, CommandMessage)
-      |> process.select_map(event_subscription.subject, PubSubMessage)
+      |> process.select_map(direct_subject, DirectCommand)
+      |> process.merge_selector(process.map_selector(command_selector, OrderCommand))
+      |> process.merge_selector(process.map_selector(event_selector, OrderEvent))
 
     // Return initialized actor
     actor.initialised(ProcessorState(status: "ready", processed: 0))
     |> actor.selecting(selector)
-    |> actor.returning(subject)
+    |> actor.returning(direct_subject)  // Return direct command interface
     |> Ok
   })
   |> actor.on_message(handle_processor_message)
@@ -147,128 +249,33 @@ pub fn start_order_processor() {
 
 fn handle_processor_message(state, message) {
   case message {
-    CommandMessage(ProcessOrder(id, reply_with)) -> {
-      // Handle direct command
+    OrderCommand(orders.ProcessOrder(id, reply_with)) -> {
+      // Handle registry command
       process.send(reply_with, True)
       actor.continue(ProcessorState(..state, processed: state.processed + 1))
     }
-    CommandMessage(GetStatus(reply_with)) -> {
+    OrderCommand(orders.GetStatus(reply_with)) -> {
       // Return status
       process.send(reply_with, state.status)
       actor.continue(state)
     }
-    PubSubMessage(OrderCreated(id, amount)) -> {
-      // React to broadcasted event
+    OrderEvent(orders.OrderCreated(id, amount)) -> {
+      // React to PubSub event
       actor.continue(ProcessorState(..state, status: "Processing order " <> id))
     }
-    PubSubMessage(SystemAlert(message)) -> {
+    OrderEvent(orders.SystemAlert(message)) -> {
       // Handle system-wide alerts
       actor.continue(ProcessorState(..state, status: "Alert: " <> message))
     }
+    DirectCommand(user_command) -> {
+      // Handle direct commands
+      actor.continue(state)
+    }
+    Shutdown -> {
+      actor.stop()
+    }
   }
 }
-
-// Usage:
-pub fn example_usage() {
-  let assert Ok(processor) = start_order_processor()
-  
-  // Send commands via Registry
-  let assert Ok(status) = registry.call(command_registry, "order_processor", waiting: 1000, sending: GetStatus)
-  let assert Ok(_) = registry.send(command_registry, "order_processor", ProcessOrder("ORDER456", reply_subject))
-  
-  // Broadcast events via PubSub  
-  let reached = pubsub.publish(event_pubsub, "orders", OrderCreated("ORDER789", 150))
-}
-```
-
-## Type Safety with MessageType
-
-Glyn enforces type safety at both compile-time and runtime using `MessageType`:
-
-```gleam
-// Define MessageTypes with version strings for evolution
-pub const chat_type: glyn.MessageType(ChatMessage) = glyn.MessageType("ChatMessage_v1")
-pub const metric_type: glyn.MessageType(MetricEvent) = glyn.MessageType("MetricEvent_v1")
-
-// Different MessageTypes are completely isolated
-let chat_pubsub = pubsub.new(scope: "app", message_type: chat_type)
-let metric_pubsub = pubsub.new(scope: "app", message_type: metric_type)
-
-let chat_subscription = pubsub.subscribe(chat_pubsub, "general", process.self())
-
-// This publishes to metric subscribers only - won't reach chat subscribers
-let reached = pubsub.publish(metric_pubsub, "general", CounterIncrement("requests", 1))
-// reached == 0 (no chat subscribers receive metric events)
-```
-
-## Distributed Clustering
-
-Both PubSub and Registry work across Erlang distributed clusters:
-
-```gleam
-// Node A - Start subscriber and register service
-let pubsub = pubsub.new(scope: "global_events", message_type: order_event_type)
-let registry = registry.new(scope: "global_services", message_type: command_type)
-
-let subscription = pubsub.subscribe(pubsub, "orders", process.self())
-let assert Ok(_) = registry.register(registry, "order_service", command_subject, "v1.0")
-
-// Node B - Publish event and call service (same scope and MessageType)
-let pubsub = pubsub.new(scope: "global_events", message_type: order_event_type) 
-let registry = registry.new(scope: "global_services", message_type: command_type)
-
-// Event published on Node B reaches subscriber on Node A
-let reached = pubsub.publish(pubsub, "orders", OrderCreated("GLOBAL123", 200))
-
-// Command sent to service registered on Node A
-let assert Ok(result) = registry.call(registry, "order_service", waiting: 5000, sending: ProcessOrder("GLOBAL123"))
-```
-
-## API Reference
-
-### PubSub Functions
-
-```gleam
-import glyn/pubsub
-
-// Create PubSub system
-pubsub.new(scope: String, message_type: MessageType(message)) -> PubSub(message)
-
-// Subscribe to events
-pubsub.subscribe(pubsub: PubSub(message), group: String, pid: Pid) -> Subscription(message, String)
-
-// Publish events (returns subscriber count)
-pubsub.publish(pubsub: PubSub(message), group: String, message: message) -> Int
-
-// Get current subscribers
-pubsub.subscribers(pubsub: PubSub(message), group: String) -> List(Pid)
-
-// Unsubscribe
-pubsub.unsubscribe(subscription: Subscription(message, group)) -> Nil
-```
-
-### Registry Functions
-
-```gleam
-import glyn/registry
-
-// Create Registry system  
-registry.new(scope: String, message_type: MessageType(message)) -> Registry(message, metadata)
-
-// Register process under name
-registry.register(registry: Registry(message, metadata), name: String, subject: Subject(message), metadata: metadata) -> Result(Registration, String)
-
-// Look up registered process
-registry.lookup(registry: Registry(message, metadata), name: String) -> Result(#(Subject(message), metadata), String)
-
-// Send message (fire and forget)
-registry.send(registry: Registry(message, metadata), name: String, message: message) -> Result(Nil, String)
-
-// Call and wait for reply
-registry.call(registry: Registry(message, metadata), name: String, waiting: Int, sending: fn(Subject(reply)) -> message) -> Result(reply, String)
-
-// Unregister process
-registry.unregister(registration: Registration(message, metadata)) -> Result(Nil, String)
 ```
 
 ## Development

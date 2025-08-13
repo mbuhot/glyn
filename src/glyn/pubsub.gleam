@@ -1,61 +1,82 @@
-////  Glyn PubSub - Type-Safe Distributed Event Streaming
+////  Glyn PubSub 2.0.0 - Selector-Based Type-Safe Event Streaming
 ////
-////  This module provides a type-safe wrapper around Erlang's `syn` PubSub system,
+////  This module provides a selector-based wrapper around Erlang's `syn` PubSub system,
 ////  enabling distributed event streaming and one-to-many message broadcasting with
-////  compile-time type safety.
+////  runtime type safety through dynamic decoding.
 ////
-////  ## Actor Integration Pattern
+////  ## Multi-Channel Actor Integration Pattern
 ////
-////  PubSub works seamlessly with Gleam's actor system using the selector pattern:
+////  PubSub seamlessly composes with other message channels using selectors:
 ////
 ////  ```gleam
 ////  import gleam/otp/actor
+////  import gleam/erlang/process
+////  import glyn/pubsub
+////  import glyn/decode_utils
 ////
-////  pub type ChatActorMessage {
-////    GetMessageCount(reply_with: Subject(Int))
-////    ChatEvent(ChatMessage)
-////    ChatActorShutdown
+////  pub type ActorMessage {
+////    DirectCommand(UserCommand)    // Direct commands
+////    PubSubEvent(ChatMessage)      // PubSub events (decoded)
+////    SystemEvent(MetricEvent)      // Another PubSub channel
 ////  }
 ////
-////  fn start_chat_actor(
-////    pubsub: pubsub.PubSub(ChatMessage),
-////    group: String,
-////  ) -> Result(actor.Started(Subject(ChatActorMessage)), actor.StartError) {
-////    actor.new_with_initialiser(5000, fn(subject) {
-////      let subscription = pubsub.subscribe(pubsub, group, process.self())
+////  fn start_multi_channel_actor() {
+////    actor.new_with_initialiser(5000, fn(_) {
+////      let command_subject = process.new_subject()
 ////
-////      let selector =
+////      // Create base selector for direct commands
+////      let base_selector =
 ////        process.new_selector()
-////        |> process.select(subject)
-////        |> process.select_map(subscription.subject, ChatEvent)
+////        |> process.select_map(command_subject, DirectCommand)
 ////
-////      let initial_state = ChatActorState(message_count: 0, last_message: "")
+////      // Add chat PubSub channel
+////      let chat_pubsub = pubsub.new(
+////        "chat_scope",
+////        decode_utils.chat_message_decoder(),
+////        decode_utils.AdminMessage("decode_error")
+////      )
+////      let chat_selector = pubsub.subscribe(chat_pubsub, "general")
+////      let with_chat = base_selector
+////        |> process.merge_selector(process.map_selector(chat_selector, PubSubEvent))
+////
+////      // Add metrics PubSub channel
+////      let metrics_pubsub = pubsub.new(
+////        "metrics_scope",
+////        decode_utils.metric_event_decoder(),
+////        decode_utils.TimerRecord("decode_error", 0)
+////      )
+////      let metrics_selector = pubsub.subscribe(metrics_pubsub, "system")
+////      let final_selector = with_chat
+////        |> process.merge_selector(process.map_selector(metrics_selector, SystemEvent))
 ////
 ////      actor.initialised(initial_state)
-////      |> actor.selecting(selector)
-////      |> actor.returning(subject)
+////      |> actor.selecting(final_selector)
+////      |> actor.returning(command_subject)
 ////      |> Ok
 ////    })
-////    |> actor.on_message(handle_chat_message)
-////    |> actor.start()
 ////  }
 ////  ```
 
 import gleam/dynamic.{type Dynamic}
+import gleam/dynamic/decode
 import gleam/erlang/atom
-import gleam/erlang/process.{type Pid, type Subject}
+import gleam/erlang/process.{type Pid, type Selector}
+import gleam/result
+import gleam/string
 
-import glyn.{type MessageType}
+type SynResult
+
+type SynOk
 
 // FFI bindings for syn PubSub operations
 @external(erlang, "syn", "add_node_to_scopes")
-fn syn_add_node_to_scopes(scopes: List(atom.Atom)) -> atom.Atom
+fn syn_add_node_to_scopes(scopes: List(atom.Atom)) -> SynOk
 
 @external(erlang, "syn", "join")
-fn syn_join(scope: atom.Atom, group: group, pid: Pid) -> atom.Atom
+fn syn_join(scope: atom.Atom, group: group, pid: Pid) -> SynResult
 
 @external(erlang, "syn", "leave")
-fn syn_leave(scope: atom.Atom, group: group, pid: Pid) -> atom.Atom
+fn syn_leave(scope: atom.Atom, group: group, pid: Pid) -> SynResult
 
 @external(erlang, "syn", "members")
 fn syn_members(scope: atom.Atom, group: group) -> List(Pid)
@@ -67,91 +88,93 @@ fn syn_publish(
   message: message,
 ) -> Result(Int, Dynamic)
 
+@external(erlang, "syn", "member_count")
+fn syn_member_count(scope: atom.Atom, group: group) -> Int
+
+@external(erlang, "syn_ffi", "to_result")
+fn to_result(result: SynResult) -> Result(Nil, Dynamic)
+
 // Convert any value to Dynamic
 @external(erlang, "gleam_stdlib", "identity")
 fn to_dynamic(value: a) -> Dynamic
 
-// Hash function for deterministic type identification
-@external(erlang, "erlang", "phash2")
-fn phash2(term: any) -> Int
-
-/// Type-safe PubSub wrapper
+/// Type-safe PubSub with dynamic decoding
 pub opaque type PubSub(message) {
-  PubSub(scope: atom.Atom, tag: Int)
-}
-
-/// Subscription handle for cleanup
-pub type Subscription(message, group) {
-  Subscription(
-    pubsub: PubSub(message),
-    group: group,
-    subject: Subject(message),
-    subscriber_pid: Pid,
+  PubSub(
+    scope: atom.Atom,
+    decoder: decode.Decoder(message),
+    error_default: message,
   )
 }
 
-/// Create a new type-safe PubSub system with a message type for deterministic type identification
-/// The message_type should be a MessageType that uniquely identifies the message type
+pub type PubSubError {
+  PublishFailed(String)
+}
+
+/// Create a new PubSub system for a given scope with dynamic decoding
 pub fn new(
-  scope scope: String,
-  message_type message_type: MessageType(message),
+  scope: String,
+  decoder: decode.Decoder(message),
+  error_default: message,
 ) -> PubSub(message) {
   let scope = atom.create(scope)
   syn_add_node_to_scopes([scope])
-  PubSub(scope: scope, tag: phash2(message_type.id))
+  PubSub(scope:, decoder:, error_default:)
 }
 
-/// Subscribe to a PubSub group and return a type-safe Subject
+/// Subscribe to a PubSub group and compose into a selector
+/// Creates an internal Subject(Dynamic) and uses select_map for type safety
 pub fn subscribe(
-  pubsub: PubSub(message),
-  group: group,
-  subscriber_pid: Pid,
-) -> Subscription(message, group) {
-  let tagged_group = #(group, pubsub.tag)
-  assert atom.create("ok")
-    == syn_join(pubsub.scope, tagged_group, subscriber_pid)
+  pubsub pubsub: PubSub(message),
+  group group: String,
+) -> Selector(message) {
+  let current_pid = process.self()
+  let group_tag = to_dynamic(group)
 
-  // Create a Subject using the shared tag
-  let subject =
-    process.unsafely_create_subject(subscriber_pid, to_dynamic(pubsub.tag))
-
-  Subscription(
-    pubsub: pubsub,
-    group: group,
-    subject: subject,
-    subscriber_pid: subscriber_pid,
-  )
+  // Join the group with the current process
+  let assert Ok(Nil) = syn_join(pubsub.scope, group, current_pid) |> to_result()
+  let dynamic_subject = process.unsafely_create_subject(current_pid, group_tag)
+  process.new_selector()
+  |> process.select_map(dynamic_subject, fn(dynamic) {
+    decode.run(dynamic, pubsub.decoder)
+    |> result.unwrap(pubsub.error_default)
+  })
 }
 
 /// Unsubscribe from a PubSub group
-pub fn unsubscribe(subscription: Subscription(message, group)) -> Nil {
-  let tagged_group = #(subscription.group, subscription.pubsub.tag)
-  assert atom.create("ok")
-    == syn_leave(
-      subscription.pubsub.scope,
-      tagged_group,
-      subscription.subscriber_pid,
-    )
-  Nil
+pub fn unsubscribe(pubsub: PubSub(message), group: String) -> Nil {
+  let current_pid = process.self()
+  case syn_leave(pubsub.scope, group, current_pid) |> to_result() {
+    Ok(Nil) -> Nil
+    Error(_) -> Nil
+    // NotInGroup is OK - already unsubscribed
+  }
 }
 
 /// Publish a type-safe message to all subscribers of a group
-pub fn publish(pubsub: PubSub(message), group: group, message: message) -> Int {
-  // Create the tagged message that matches what process.send would create
-  // We use the tag for type identification
-  let tagged_message = #(to_dynamic(pubsub.tag), message)
-
-  // Use tagged group name to ensure only compatible subscribers receive the message
-  let tagged_group = #(group, pubsub.tag)
+pub fn publish(
+  pubsub: PubSub(message),
+  group: String,
+  message: message,
+) -> Result(Int, PubSubError) {
+  let group_tag = to_dynamic(group)
+  // Create the tagged message that matches what the subject expects
+  let tagged_message = #(group_tag, message)
 
   // Publish the tagged message through syn
-  let assert Ok(subscriber_count) =
-    syn_publish(pubsub.scope, tagged_group, to_dynamic(tagged_message))
-  subscriber_count
+  case syn_publish(pubsub.scope, group, to_dynamic(tagged_message)) {
+    Ok(subscriber_count) -> Ok(subscriber_count)
+    Error(reason) ->
+      Error(PublishFailed("publish failed: " <> string.inspect(reason)))
+  }
 }
 
 /// Get list of subscriber PIDs for a group (useful for debugging)
 pub fn subscribers(pubsub: PubSub(message), group: String) -> List(Pid) {
-  let tagged_group = #(group, pubsub.tag)
-  syn_members(pubsub.scope, tagged_group)
+  syn_members(pubsub.scope, group)
+}
+
+/// Get the count of subscribers for a group
+pub fn subscriber_count(pubsub: PubSub(message), group: String) -> Int {
+  syn_member_count(pubsub.scope, group)
 }

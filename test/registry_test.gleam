@@ -1,198 +1,333 @@
+import decode_utils
 import gleam/erlang/process.{type Subject}
 import gleeunit
-import glyn
 import glyn/registry
 
 pub fn main() -> Nil {
   gleeunit.main()
 }
 
-// Test message types for Registry
-pub type ServiceMessage {
-  GetStatus(reply_with: Subject(String))
-  ProcessRequest(id: String, reply_with: Subject(Bool))
+// Actor message types for testing multi-channel composition
+pub type TestActorMessage {
+  DirectCommand(DirectMessage)
+  RegistryMessage(decode_utils.ServiceMessage)
+  SystemCommand(decode_utils.SystemCommand)
   Shutdown
 }
 
-// Message type constants for registry type safety
-pub const service_message_type: glyn.MessageType(ServiceMessage) = glyn.MessageType(
-  "ServiceMessage_v1",
-)
-
-pub const system_command_type: glyn.MessageType(SystemCommand) = glyn.MessageType(
-  "SystemCommand_v1",
-)
-
-pub type UserInfo {
-  UserInfo(name: String, age: Int)
+pub type DirectMessage {
+  Ping(reply_with: Subject(String))
+  SetState(state: String)
+  GetState(reply_with: Subject(String))
 }
 
-// Test basic registration and lookup functionality
-pub fn basic_registration_and_lookup_test() {
-  // Arrange: Create registry and subject with metadata
-  let registry =
-    registry.new(scope: "test_scope", message_type: service_message_type)
-  let subject = process.new_subject()
-  let test_metadata = "service_v1"
-
-  // Act: Register the subject
-  let registration_result =
-    registry.register(registry, "test_service", subject, test_metadata)
-
-  // Assert: Registration should succeed
-  let assert Ok(registration) = registration_result
-  assert registration.name == "test_service"
-  assert registration.metadata == test_metadata
-
-  // Act: Look up the registered subject
-  let lookup_result = registry.lookup(registry, "test_service")
-
-  // Assert: Lookup should return the same subject and metadata
-  let assert Ok(#(found_subject, found_metadata)) = lookup_result
-  assert found_subject == subject
-  assert found_metadata == test_metadata
+pub type TestActorState {
+  TestActorState(message_count: Int, last_message: String, state: String)
 }
 
-// Test error handling when looking up non-existent process
-pub fn lookup_non_existent_process_test() {
-  // Arrange: Create registry (no registrations)
-  let registry =
-    registry.new(scope: "error_test_scope", message_type: service_message_type)
-
-  // Act: Try to lookup a process that doesn't exist
-  let lookup_result = registry.lookup(registry, "non_existent_service")
-
-  // Assert: Should return an error
-  let assert Error(error_message) = lookup_result
-  assert error_message == "Process not found: non_existent_service"
-}
-
-// Test unregister functionality
-pub fn unregister_process_test() {
-  // Arrange: Create registry and register a process
+// Test basic registry registration with selector composition
+pub fn basic_registration_with_selector_test() {
+  // Arrange: Create registry with service message decoder
   let registry =
     registry.new(
-      scope: "unregister_test_scope",
-      message_type: service_message_type,
-    )
-  let subject = process.new_subject()
-  let test_metadata = "unregister_service_v1"
-
-  let assert Ok(registration) =
-    registry.register(registry, "temp_service", subject, test_metadata)
-
-  // Verify it exists first
-  let assert Ok(_) = registry.lookup(registry, "temp_service")
-
-  // Act: Unregister the process
-  let unregister_result = registry.unregister(registration)
-
-  // Assert: Unregistration should succeed
-  let assert Ok(_) = unregister_result
-
-  // Act: Try to lookup the unregistered process
-  let lookup_result = registry.lookup(registry, "temp_service")
-
-  // Assert: Should no longer be found
-  let assert Error(error_message) = lookup_result
-  assert error_message == "Process not found: temp_service"
-}
-
-// Test send_to_registered convenience function with actual message handling
-pub fn send_to_registered_test() {
-  // Arrange: Create registry
-  let registry =
-    registry.new(scope: "send_test_scope", message_type: service_message_type)
-
-  // Create a simple service that handles GetStatus messages
-  let service_subject = process.new_subject()
-  let test_metadata = "send_service_v1"
-
-  // Register the service subject in the registry
-  let assert Ok(_registration) =
-    registry.register(
-      registry,
-      "message_service",
-      service_subject,
-      test_metadata,
+      scope: "test_basic_selector",
+      decoder: decode_utils.service_message_decoder(),
+      error_default: decode_utils.Shutdown,
     )
 
-  // Create a reply subject for the message
+  // Create base selector for direct commands
+  let command_subject = process.new_subject()
+  let base_selector =
+    process.new_selector()
+    |> process.select_map(command_subject, DirectCommand)
+
+  // Act: Register and compose selectors
+  let assert Ok(registry_selector) =
+    registry.register(registry, "test_service", "test_metadata_v1")
+  let enhanced_selector =
+    base_selector
+    |> process.merge_selector(process.map_selector(
+      registry_selector,
+      RegistryMessage,
+    ))
+
+  // Assert: Selector should be enhanced (this is implicit - if register succeeded, selector is enhanced)
+  // We can verify by checking that whereis works
+  let assert Ok(#(_pid, metadata)) = registry.whereis(registry, "test_service")
+  assert metadata == "test_metadata_v1"
+
+  // Test sending a message and receiving it through the selector
   let reply_subject = process.new_subject()
+  let message = decode_utils.GetStatus(reply_subject)
 
-  // Act: Send a message to the registered process
-  let send_result =
-    registry.send(registry, "message_service", GetStatus(reply_subject))
+  // Send message to registered process
+  let assert Ok(_) = registry.send(registry, "test_service", message)
 
-  // Assert: Send should succeed
-  let assert Ok(_) = send_result
-
-  // Simulate a service handling the message by receiving it and sending a reply
-  let assert Ok(received_message) = process.receive(service_subject, 100)
-  let assert GetStatus(received_reply_subject) = received_message
-
-  // Service sends a reply back
-  process.send(received_reply_subject, "service_active")
-
-  // Now receive the reply that was sent back
-  let assert Ok(status_reply) = process.receive(reply_subject, 100)
-  assert status_reply == "service_active"
-
-  // Test error case: send to non-existent process
-  let error_result = registry.send(registry, "non_existent_service", Shutdown)
-
-  // Assert: Should return an error
-  let assert Error(error_message) = error_result
-  assert error_message == "Process not found: non_existent_service"
+  // Use selector to receive the message (with timeout)
+  case process.selector_receive(enhanced_selector, 100) {
+    Ok(RegistryMessage(decode_utils.GetStatus(received_reply_subject))) -> {
+      // Message decoded successfully
+      assert received_reply_subject == reply_subject
+    }
+    Ok(DirectCommand(_)) -> {
+      panic as "Received direct command instead of registry message"
+    }
+    Ok(_) -> {
+      panic as "Received unexpected message type"
+    }
+    Error(_) -> {
+      panic as "Message not received within timeout"
+    }
+  }
 }
 
-// Additional message type for type safety test
-pub type SystemCommand {
-  StartSystem(reply_with: Subject(Bool))
-  StopSystem
-  GetSystemInfo(reply_with: Subject(String))
-}
-
-// Test type safety - processes registered under different Registry types cannot be looked up
-pub fn registry_type_safety_test() {
-  // Arrange: Create two registries with different message types
+// Test multi-channel actor composition
+pub fn multi_channel_actor_composition_test() {
+  // Arrange: Create registries for different message types
   let service_registry =
-    registry.new(scope: "type_safety_scope", message_type: service_message_type)
+    registry.new(
+      scope: "test_multi_channel_service",
+      decoder: decode_utils.service_message_decoder(),
+      error_default: decode_utils.Shutdown,
+    )
+
   let system_registry =
-    registry.new(scope: "type_safety_scope", message_type: system_command_type)
-
-  // Register a process under the ServiceMessage registry
-  let service_subject = process.new_subject()
-  let assert Ok(_registration) =
-    registry.register(
-      service_registry,
-      "shared_service",
-      service_subject,
-      "service_metadata",
+    registry.new(
+      scope: "test_multi_channel_system",
+      decoder: decode_utils.system_command_decoder(),
+      error_default: decode_utils.StopSystem,
     )
 
-  // Verify we can look it up from the correct registry
-  let assert Ok(#(_found_subject, metadata)) =
-    registry.lookup(service_registry, "shared_service")
-  assert metadata == "service_metadata"
+  // Create actor with multi-channel selector
+  let command_subject = process.new_subject()
 
-  // Act: Try to look up the same process from the SystemCommand registry
-  let lookup_result = registry.lookup(system_registry, "shared_service")
+  // Start with direct command channel
+  let base_selector =
+    process.new_selector()
+    |> process.select_map(command_subject, DirectCommand)
 
-  // Assert: Should fail with type incompatibility error
-  let assert Error(error_message) = lookup_result
-  assert error_message
-    == "Process registered under incompatible type: shared_service"
+  // Add service registry channel
+  let assert Ok(service_registry_selector) =
+    registry.register(service_registry, "multi_service", "service_meta")
+  let with_service =
+    base_selector
+    |> process.merge_selector(process.map_selector(
+      service_registry_selector,
+      RegistryMessage,
+    ))
 
-  // Also test send_to_registered fails with same error
-  let bool_reply_subject = process.new_subject()
-  let send_result =
+  // Add system registry channel
+  let assert Ok(system_registry_selector) =
+    registry.register(system_registry, "multi_system", "system_meta")
+  let final_selector =
+    with_service
+    |> process.merge_selector(process.map_selector(
+      system_registry_selector,
+      SystemCommand,
+    ))
+
+  // Act & Assert: Test that all three channels work
+
+  // Test direct command
+  process.send(command_subject, Ping(process.new_subject()))
+  case process.selector_receive(final_selector, 100) {
+    Ok(DirectCommand(Ping(_))) -> Nil
+    _ -> panic as "Direct command channel failed"
+  }
+
+  // Test service registry message
+  let assert Ok(_) =
     registry.send(
-      system_registry,
-      "shared_service",
-      StartSystem(bool_reply_subject),
+      service_registry,
+      "multi_service",
+      decode_utils.GetStatus(process.new_subject()),
     )
-  let assert Error(send_error) = send_result
-  assert send_error
-    == "Process registered under incompatible type: shared_service"
+  case process.selector_receive(final_selector, 100) {
+    Ok(RegistryMessage(decode_utils.GetStatus(_))) -> Nil
+    _ -> panic as "Service registry channel failed"
+  }
+
+  // Test system registry message
+  let assert Ok(_) =
+    registry.send(system_registry, "multi_system", decode_utils.StopSystem)
+  case process.selector_receive(final_selector, 100) {
+    Ok(SystemCommand(decode_utils.StopSystem)) -> Nil
+    _ -> panic as "System registry channel failed"
+  }
 }
+
+// Test decode error handling
+// TODO: Implement once we have a way to send raw dynamic messages for testing
+// pub fn decode_error_handling_test() {
+//   // This test requires access to registry internals for sending raw messages
+//   // Will be implemented in integration tests
+//   Nil
+// }
+
+// Test type safety through different scopes and decoders
+pub fn type_safety_through_scopes_test() {
+  // Arrange: Create two registries with different decoders in same scope
+  // This tests that processes can be registered under same name but different scopes
+  let service_registry =
+    registry.new(
+      scope: "type_safety_service",
+      decoder: decode_utils.service_message_decoder(),
+      error_default: decode_utils.Shutdown,
+    )
+
+  let system_registry =
+    registry.new(
+      scope: "type_safety_system",
+      // Different scope
+      decoder: decode_utils.system_command_decoder(),
+      error_default: decode_utils.StopSystem,
+    )
+
+  let command_subject = process.new_subject()
+  let _base_selector =
+    process.new_selector() |> process.select_map(command_subject, DirectCommand)
+
+  // Register same name in both registries
+  let assert Ok(_) =
+    registry.register(service_registry, "shared_name", "service_meta")
+
+  let assert Ok(_) =
+    registry.register(
+      system_registry,
+      "shared_name",
+      // Same name, different scope
+      "system_meta",
+    )
+
+  // Act & Assert: Both should work independently
+  let assert Ok(#(_pid1, meta1)) =
+    registry.whereis(service_registry, "shared_name")
+  let assert Ok(#(_pid2, meta2)) =
+    registry.whereis(system_registry, "shared_name")
+
+  assert meta1 == "service_meta"
+  assert meta2 == "system_meta"
+
+  // Send different message types to same name in different scopes
+  let assert Ok(_) =
+    registry.send(service_registry, "shared_name", decode_utils.Shutdown)
+
+  let assert Ok(_) =
+    registry.send(system_registry, "shared_name", decode_utils.StopSystem)
+
+  // Both should succeed without interference
+  Nil
+}
+
+// Test registry operations (send, call, whereis, unregister)
+pub fn registry_operations_test() {
+  // Arrange: Create registry and register a service
+  let registry =
+    registry.new(
+      scope: "test_operations",
+      decoder: decode_utils.service_message_decoder(),
+      error_default: decode_utils.Shutdown,
+    )
+
+  let command_subject = process.new_subject()
+  let _base_selector =
+    process.new_selector() |> process.select_map(command_subject, DirectCommand)
+
+  let assert Ok(_registry_selector) =
+    registry.register(registry, "operations_service", "ops_meta")
+
+  // Test whereis
+  let assert Ok(#(_pid, metadata)) =
+    registry.whereis(registry, "operations_service")
+  assert metadata == "ops_meta"
+
+  // Test send
+  let assert Ok(_) =
+    registry.send(
+      registry,
+      "operations_service",
+      decode_utils.UpdateConfig("key1", "value1"),
+    )
+
+  // Test unregister
+  let assert Ok(_) = registry.unregister(registry, "operations_service")
+
+  // After unregister, whereis should fail
+  let assert Error(registry.ProcessNotFound("operations_service")) =
+    registry.whereis(registry, "operations_service")
+
+  // Send should also fail
+  let assert Error(registry.ProcessNotFound("operations_service")) =
+    registry.send(registry, "operations_service", decode_utils.Shutdown)
+}
+
+// Test distributed behavior simulation
+pub fn distributed_behavior_simulation_test() {
+  // Arrange: Create two registries with same scope and decoder (simulating different nodes)
+  let registry1 =
+    registry.new(
+      scope: "distributed_test",
+      decoder: decode_utils.service_message_decoder(),
+      error_default: decode_utils.Shutdown,
+    )
+
+  let registry2 =
+    registry.new(
+      scope: "distributed_test",
+      // Same scope = distributed behavior
+      decoder: decode_utils.service_message_decoder(),
+      error_default: decode_utils.Shutdown,
+    )
+
+  let command_subject = process.new_subject()
+  let _base_selector =
+    process.new_selector() |> process.select_map(command_subject, DirectCommand)
+
+  // Register in first "node"
+  let assert Ok(_) =
+    registry.register(registry1, "distributed_service", "node1_meta")
+
+  // Act: Lookup from second "node"
+  let assert Ok(#(_pid, metadata)) =
+    registry.whereis(registry2, "distributed_service")
+
+  // Assert: Should find the service registered in the first "node"
+  assert metadata == "node1_meta"
+
+  // Send message from second "node" to service in first "node"
+  let assert Ok(_) =
+    registry.send(
+      registry2,
+      "distributed_service",
+      decode_utils.GetStatus(process.new_subject()),
+    )
+
+  // This proves distributed behavior works
+  Nil
+}
+
+// Test error handling for non-existent processes
+pub fn error_handling_test() {
+  let registry =
+    registry.new(
+      scope: "test_errors",
+      decoder: decode_utils.service_message_decoder(),
+      error_default: decode_utils.Shutdown,
+    )
+
+  // Test whereis for non-existent process
+  let assert Error(registry.ProcessNotFound("nonexistent")) =
+    registry.whereis(registry, "nonexistent")
+
+  // Test send to non-existent process
+  let assert Error(registry.ProcessNotFound("nonexistent")) =
+    registry.send(registry, "nonexistent", decode_utils.Shutdown)
+
+  // Test unregister non-existent process
+  case registry.unregister(registry, "nonexistent") {
+    Error(registry.UnregistrationFailed(_)) -> Nil
+    _ -> panic as "Should have failed to unregister non-existent process"
+  }
+}
+// TODO: Add FFI helper for testing decode errors once registry exposes scope access
+// This would require either exposing the scope or adding a test helper to registry module

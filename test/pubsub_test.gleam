@@ -1,533 +1,397 @@
+import decode_utils
 import gleam/erlang/process.{type Subject}
 import gleam/list
-import gleam/otp/actor
 import gleeunit
-import glyn
 import glyn/pubsub
 
 pub fn main() -> Nil {
   gleeunit.main()
 }
 
-// Test message types for PubSub
-pub type ChatMessage {
-  UserJoined(username: String)
-  UserLeft(username: String)
-  Message(username: String, content: String)
+// Actor message types for testing multi-channel composition
+pub type TestActorMessage {
+  DirectCommand(DirectMessage)
+  PubSubEvent(decode_utils.ChatMessage)
+  SystemEvent(decode_utils.MetricEvent)
+  Shutdown
 }
 
-pub type MetricEvent {
-  CounterIncrement(name: String, value: Int)
-  GaugeUpdate(name: String, value: Float)
-  TimerRecord(name: String, duration_ms: Int)
+pub type DirectMessage {
+  Ping(reply_with: Subject(String))
+  SetState(state: String)
+  GetState(reply_with: Subject(String))
 }
 
-// Message type constants - these create a compile-time association with message types
-pub const chat_message_type: glyn.MessageType(ChatMessage) = glyn.MessageType(
-  "ChatMessage_v1",
-)
-
-pub const metric_event_type: glyn.MessageType(MetricEvent) = glyn.MessageType(
-  "MetricEvent_v1",
-)
-
-pub type ChatActorMessage {
-  // Direct actor commands
-  GetMessageCount(reply_with: Subject(Int))
-  GetLastMessage(reply_with: Subject(String))
-  GetReady(reply_with: Subject(Nil))
-  ChatActorShutdown
-  // PubSub events
-  ChatEvent(ChatMessage)
-}
-
-pub type MetricActorMessage {
-  GetTotalCount(reply_with: Subject(Int))
-  GetMetricCount(reply_with: Subject(Int))
-  GetMetricReady(reply_with: Subject(Nil))
-  MetricEvent(MetricEvent)
-  MetricActorShutdown
-}
-
-pub type ChatActorState {
-  ChatActorState(message_count: Int, last_message: String)
-}
-
-pub type MetricActorState {
-  MetricActorState(total_count: Int, metric_count: Int)
-}
-
-// Helper to handle chat messages for testing actors
-fn handle_chat_message(
-  state: ChatActorState,
-  message: ChatActorMessage,
-) -> actor.Next(ChatActorState, ChatActorMessage) {
-  case message {
-    GetMessageCount(reply_with) -> {
-      process.send(reply_with, state.message_count)
-      actor.continue(state)
-    }
-    GetLastMessage(reply_with) -> {
-      process.send(reply_with, state.last_message)
-      actor.continue(state)
-    }
-    GetReady(reply_with) -> {
-      process.send(reply_with, Nil)
-      actor.continue(state)
-    }
-    ChatActorShutdown -> {
-      actor.stop()
-    }
-    ChatEvent(chat_message) -> {
-      let new_count = state.message_count + 1
-      let last_message = case chat_message {
-        UserJoined(username) -> "User joined: " <> username
-        UserLeft(username) -> "User left: " <> username
-        Message(username, content) -> username <> ": " <> content
-      }
-      let new_state =
-        ChatActorState(message_count: new_count, last_message: last_message)
-      actor.continue(new_state)
-    }
-  }
-}
-
-// Helper to handle metric messages for testing actors
-fn handle_metric_message(
-  state: MetricActorState,
-  message: MetricActorMessage,
-) -> actor.Next(MetricActorState, MetricActorMessage) {
-  case message {
-    GetTotalCount(reply_with) -> {
-      process.send(reply_with, state.total_count)
-      actor.continue(state)
-    }
-    GetMetricCount(reply_with) -> {
-      process.send(reply_with, state.metric_count)
-      actor.continue(state)
-    }
-    GetMetricReady(reply_with) -> {
-      process.send(reply_with, Nil)
-      actor.continue(state)
-    }
-    MetricActorShutdown -> {
-      actor.stop()
-    }
-    MetricEvent(metric_event) -> {
-      let new_metric_count = state.metric_count + 1
-      let new_total_count = case metric_event {
-        CounterIncrement(_, value) -> state.total_count + value
-        GaugeUpdate(_, _) -> state.total_count
-        TimerRecord(_, duration) -> state.total_count + duration
-      }
-      let new_state =
-        MetricActorState(
-          total_count: new_total_count,
-          metric_count: new_metric_count,
-        )
-      actor.continue(new_state)
-    }
-  }
-}
-
-// Helper to start chat actor with PubSub subscription
-fn start_chat_actor(
-  pubsub: pubsub.PubSub(ChatMessage),
-  group: String,
-) -> Result(actor.Started(Subject(ChatActorMessage)), actor.StartError) {
-  actor.new_with_initialiser(5000, fn(subject) {
-    let subscription = pubsub.subscribe(pubsub, group, process.self())
-
-    let selector =
-      process.new_selector()
-      |> process.select(subject)
-      |> process.select_map(subscription.subject, ChatEvent)
-
-    let initial_state = ChatActorState(message_count: 0, last_message: "")
-
-    actor.initialised(initial_state)
-    |> actor.selecting(selector)
-    |> actor.returning(subject)
-    |> Ok
-  })
-  |> actor.on_message(handle_chat_message)
-  |> actor.start()
-}
-
-// Helper to start metric actor with PubSub subscription
-fn start_metric_actor(
-  pubsub: pubsub.PubSub(MetricEvent),
-  group: String,
-) -> Result(actor.Started(Subject(MetricActorMessage)), actor.StartError) {
-  actor.new_with_initialiser(5000, fn(subject) {
-    let subscription = pubsub.subscribe(pubsub, group, process.self())
-
-    let selector =
-      process.new_selector()
-      |> process.select_map(subject, fn(msg) { msg })
-      |> process.select_map(subscription.subject, MetricEvent)
-
-    let initial_state = MetricActorState(total_count: 0, metric_count: 0)
-
-    actor.initialised(initial_state)
-    |> actor.selecting(selector)
-    |> actor.returning(subject)
-    |> Ok
-  })
-  |> actor.on_message(handle_metric_message)
-  |> actor.start()
-}
-
-pub fn actor_pubsub_integration_test() {
+// Test basic pubsub subscription with selector composition
+pub fn basic_subscription_with_selector_test() {
+  // Arrange: Create pubsub with chat message decoder
   let pubsub =
-    pubsub.new(scope: "chat_test_scope", message_type: chat_message_type)
-
-  // Start actor
-  let assert Ok(started) = start_chat_actor(pubsub, "general")
-  let actor_subject = started.data
-
-  // Wait for actor to be ready
-  let _ = actor.call(actor_subject, waiting: 1000, sending: GetReady)
-
-  // Publish a message
-  let subscriber_count =
-    pubsub.publish(pubsub, "general", Message("alice", "hello world"))
-  assert subscriber_count == 1
-
-  // Verify actor received the message
-  let message_count =
-    actor.call(actor_subject, waiting: 1000, sending: GetMessageCount)
-  assert message_count == 1
-
-  let last_message =
-    actor.call(actor_subject, waiting: 1000, sending: GetLastMessage)
-  assert last_message == "alice: hello world"
-
-  // Shutdown actor
-  actor.send(actor_subject, ChatActorShutdown)
-}
-
-pub fn multiple_actors_test() {
-  let pubsub =
-    pubsub.new(scope: "multi_chat_scope", message_type: chat_message_type)
-
-  // Start multiple actors
-  let assert Ok(started1) = start_chat_actor(pubsub, "general")
-  let assert Ok(started2) = start_chat_actor(pubsub, "general")
-  let assert Ok(started3) = start_chat_actor(pubsub, "general")
-
-  let actor1 = started1.data
-  let actor2 = started2.data
-  let actor3 = started3.data
-
-  // Wait for all actors to be ready
-  let _ = actor.call(actor1, waiting: 1000, sending: GetReady)
-  let _ = actor.call(actor2, waiting: 1000, sending: GetReady)
-  let _ = actor.call(actor3, waiting: 1000, sending: GetReady)
-
-  // Publish a message - should reach all 3 actors
-  let subscriber_count = pubsub.publish(pubsub, "general", UserJoined("bob"))
-  assert subscriber_count == 3
-
-  // Verify all actors received the message
-  let count1 = actor.call(actor1, waiting: 1000, sending: GetMessageCount)
-  let count2 = actor.call(actor2, waiting: 1000, sending: GetMessageCount)
-  let count3 = actor.call(actor3, waiting: 1000, sending: GetMessageCount)
-
-  assert count1 == 1
-  assert count2 == 1
-  assert count3 == 1
-
-  // Shutdown actors
-  actor.send(actor1, ChatActorShutdown)
-  actor.send(actor2, ChatActorShutdown)
-  actor.send(actor3, ChatActorShutdown)
-}
-
-pub fn group_isolation_test() {
-  let pubsub =
-    pubsub.new(scope: "group_test_scope", message_type: chat_message_type)
-
-  // Start actors in different groups
-  let assert Ok(started1) = start_chat_actor(pubsub, "general")
-  let assert Ok(started2) = start_chat_actor(pubsub, "private")
-
-  let actor1 = started1.data
-  let actor2 = started2.data
-
-  // Wait for actors to be ready
-  let _ = actor.call(actor1, waiting: 1000, sending: GetReady)
-  let _ = actor.call(actor2, waiting: 1000, sending: GetReady)
-
-  // Publish to general group - only actor1 should receive it
-  let general_count =
-    pubsub.publish(pubsub, "general", Message("alice", "general message"))
-  assert general_count == 1
-
-  // Publish to private group - only actor2 should receive it
-  let private_count =
-    pubsub.publish(pubsub, "private", Message("bob", "private message"))
-  assert private_count == 1
-
-  // Verify correct isolation
-  let count1 = actor.call(actor1, waiting: 1000, sending: GetMessageCount)
-  let count2 = actor.call(actor2, waiting: 1000, sending: GetMessageCount)
-
-  assert count1 == 1
-  // Only got general message
-  assert count2 == 1
-  // Only got private message
-
-  let last1 = actor.call(actor1, waiting: 1000, sending: GetLastMessage)
-  let last2 = actor.call(actor2, waiting: 1000, sending: GetLastMessage)
-
-  assert last1 == "alice: general message"
-  assert last2 == "bob: private message"
-
-  // Shutdown actors
-  actor.send(actor1, ChatActorShutdown)
-  actor.send(actor2, ChatActorShutdown)
-}
-
-pub fn type_safety_test() {
-  // Different scopes for different message types
-  let chat_pubsub =
-    pubsub.new(scope: "type_test_chat", message_type: chat_message_type)
-  let metric_pubsub =
-    pubsub.new(scope: "type_test_metrics", message_type: metric_event_type)
-
-  // Start actors with different message types
-  let assert Ok(chat_started) = start_chat_actor(chat_pubsub, "general")
-  let assert Ok(metric_started) = start_metric_actor(metric_pubsub, "counters")
-
-  let chat_actor = chat_started.data
-  let metric_actor = metric_started.data
-
-  // Wait for actors to be ready
-  let _ = actor.call(chat_actor, waiting: 1000, sending: GetReady)
-  let _ = actor.call(metric_actor, waiting: 1000, sending: GetMetricReady)
-
-  // Publish chat message - only chat actor should receive
-  let chat_count = pubsub.publish(chat_pubsub, "general", UserJoined("alice"))
-  assert chat_count == 1
-
-  // Publish metric event - only metric actor should receive
-  let metric_count =
-    pubsub.publish(metric_pubsub, "counters", CounterIncrement("requests", 5))
-  assert metric_count == 1
-
-  // Verify correct isolation
-  let chat_messages =
-    actor.call(chat_actor, waiting: 1000, sending: GetMessageCount)
-  let metric_messages =
-    actor.call(metric_actor, waiting: 1000, sending: GetMetricCount)
-
-  assert chat_messages == 1
-  assert metric_messages == 1
-
-  // Verify totals (metric actor adds counter values to total)
-  let total_count =
-    actor.call(metric_actor, waiting: 1000, sending: GetTotalCount)
-  assert total_count == 5
-
-  // Shutdown actors
-  actor.send(chat_actor, ChatActorShutdown)
-  actor.send(metric_actor, MetricActorShutdown)
-}
-
-pub fn distributed_consistency_test() {
-  // Create two PubSub instances with same scope and type_id (simulating different nodes)
-  let pubsub1 =
-    pubsub.new(scope: "distributed_scope", message_type: chat_message_type)
-  let pubsub2 =
-    pubsub.new(scope: "distributed_scope", message_type: chat_message_type)
-
-  // Start actor subscribed to first instance
-  let assert Ok(started) = start_chat_actor(pubsub1, "global")
-  let actor_subject = started.data
-
-  // Wait for actor to be ready
-  let _ = actor.call(actor_subject, waiting: 1000, sending: GetReady)
-
-  // Publish from second instance - should reach subscriber on first instance
-  let subscriber_count =
-    pubsub.publish(
-      pubsub2,
-      "global",
-      Message("distributed", "cross-node message"),
-    )
-  assert subscriber_count == 1
-
-  // Verify actor received the message
-  let message_count =
-    actor.call(actor_subject, waiting: 1000, sending: GetMessageCount)
-  assert message_count == 1
-
-  // Shutdown actor
-  actor.send(actor_subject, ChatActorShutdown)
-}
-
-pub fn complex_message_flow_test() {
-  let chat_pubsub =
-    pubsub.new(scope: "complex_chat", message_type: chat_message_type)
-  let metric_pubsub =
-    pubsub.new(scope: "complex_metrics", message_type: metric_event_type)
-
-  // Start multiple actors
-  let assert Ok(chat1_started) = start_chat_actor(chat_pubsub, "room1")
-  let assert Ok(chat2_started) = start_chat_actor(chat_pubsub, "room2")
-  let assert Ok(metric_started) =
-    start_metric_actor(metric_pubsub, "app_metrics")
-
-  let chat1_actor = chat1_started.data
-  let chat2_actor = chat2_started.data
-  let metric_actor = metric_started.data
-
-  // Wait for all actors to be ready
-  let _ = actor.call(chat1_actor, waiting: 1000, sending: GetReady)
-  let _ = actor.call(chat2_actor, waiting: 1000, sending: GetReady)
-  let _ = actor.call(metric_actor, waiting: 1000, sending: GetMetricReady)
-
-  // Complex message flow
-  let room1_count1 = pubsub.publish(chat_pubsub, "room1", UserJoined("alice"))
-  let room2_count1 = pubsub.publish(chat_pubsub, "room2", UserJoined("bob"))
-  let metric_count1 =
-    pubsub.publish(metric_pubsub, "app_metrics", CounterIncrement("users", 2))
-
-  assert room1_count1 == 1
-  assert room2_count1 == 1
-  assert metric_count1 == 1
-
-  // More messages
-  let room1_count2 =
-    pubsub.publish(chat_pubsub, "room1", Message("alice", "Hello room 1"))
-  let room1_count3 =
-    pubsub.publish(chat_pubsub, "room1", Message("charlie", "Hi Alice"))
-  let room2_count2 =
-    pubsub.publish(chat_pubsub, "room2", Message("bob", "Hello room 2"))
-
-  assert room1_count2 == 1
-  assert room1_count3 == 1
-  assert room2_count2 == 1
-
-  let metric_count2 =
-    pubsub.publish(metric_pubsub, "app_metrics", GaugeUpdate("memory", 85.5))
-  let metric_count3 =
-    pubsub.publish(metric_pubsub, "app_metrics", TimerRecord("request", 150))
-
-  assert metric_count2 == 1
-  assert metric_count3 == 1
-
-  // Verify final message counts
-  let chat1_messages =
-    actor.call(chat1_actor, waiting: 1000, sending: GetMessageCount)
-  let chat2_messages =
-    actor.call(chat2_actor, waiting: 1000, sending: GetMessageCount)
-  let metric_messages =
-    actor.call(metric_actor, waiting: 1000, sending: GetMetricCount)
-  let total_count =
-    actor.call(metric_actor, waiting: 1000, sending: GetTotalCount)
-
-  assert chat1_messages == 3
-  // UserJoined + 2 Messages
-  assert chat2_messages == 2
-  // UserJoined + 1 Message
-  assert metric_messages == 3
-  // CounterIncrement + GaugeUpdate + TimerRecord
-  assert total_count == 152
-  // 2 + 0 + 150 (CounterIncrement + GaugeUpdate + TimerRecord)
-
-  // Shutdown actors
-  actor.send(chat1_actor, ChatActorShutdown)
-  actor.send(chat2_actor, ChatActorShutdown)
-  actor.send(metric_actor, MetricActorShutdown)
-}
-
-pub fn actor_subscriber_count_test() {
-  let pubsub =
-    pubsub.new(scope: "subscriber_count_test", message_type: chat_message_type)
-
-  // Initially no subscribers
-  let initial_count = pubsub.subscribers(pubsub, "test_room") |> list.length
-  assert initial_count == 0
-
-  // Start an actor
-  let assert Ok(started) = start_chat_actor(pubsub, "test_room")
-  let actor_subject = started.data
-
-  // Wait for actor to be ready
-  let _ = actor.call(actor_subject, waiting: 1000, sending: GetReady)
-
-  // Now should have 1 subscriber
-  let after_subscribe_count =
-    pubsub.subscribers(pubsub, "test_room") |> list.length
-  assert after_subscribe_count == 1
-
-  // Start another actor in same group
-  let assert Ok(started2) = start_chat_actor(pubsub, "test_room")
-  let actor2_subject = started2.data
-
-  // Wait for second actor to be ready
-  let _ = actor.call(actor2_subject, waiting: 1000, sending: GetReady)
-
-  // Now should have 2 subscribers
-  let after_subscribe2_count =
-    pubsub.subscribers(pubsub, "test_room") |> list.length
-  assert after_subscribe2_count == 2
-
-  // Publish should reach both
-  let publish_count = pubsub.publish(pubsub, "test_room", UserJoined("test"))
-  assert publish_count == 2
-
-  // Shutdown actors
-  actor.send(actor_subject, ChatActorShutdown)
-  actor.send(actor2_subject, ChatActorShutdown)
-}
-
-pub fn pubsub_type_safety_violation_test() {
-  // Create two PubSub instances with same scope but different type IDs
-  let chat_pubsub =
-    pubsub.new(scope: "type_violation_scope", message_type: chat_message_type)
-  let metric_pubsub =
-    pubsub.new(scope: "type_violation_scope", message_type: metric_event_type)
-
-  // Start a chat actor subscribed to chat messages
-  let assert Ok(started) = start_chat_actor(chat_pubsub, "mixed_channel")
-  let chat_actor = started.data
-
-  // Wait for actor to be ready
-  let _ = actor.call(chat_actor, waiting: 1000, sending: GetReady)
-
-  // Publish a metric event to the metric pubsub - should NOT reach chat actor
-  let reached_subscribers =
-    pubsub.publish(
-      metric_pubsub,
-      "mixed_channel",
-      CounterIncrement("failed_hack", 1),
+    pubsub.new(
+      "test_basic_pubsub_selector",
+      decode_utils.chat_message_decoder(),
+      decode_utils.AdminMessage("decode_error"),
     )
 
-  // Should find 0 subscribers - PubSub-level type safety prevents delivery
-  assert reached_subscribers == 0
+  // Create base selector for direct commands
+  let command_subject = process.new_subject()
+  let selector =
+    process.new_selector()
+    |> process.select_map(command_subject, DirectCommand)
+    |> process.merge_selector(
+      pubsub.subscribe(pubsub, "test_group")
+      |> process.map_selector(PubSubEvent),
+    )
 
-  // Verify chat actor received no messages
-  let message_count =
-    actor.call(chat_actor, waiting: 1000, sending: GetMessageCount)
-  assert message_count == 0
+  // Publish a message to the group
+  let message = decode_utils.UserJoined("alice")
+  let assert Ok(subscriber_count) =
+    pubsub.publish(pubsub, "test_group", message)
 
-  // Now publish a chat message - should reach the chat actor
-  let chat_reached =
+  // Assert: Should have 1 subscriber
+  assert subscriber_count == 1
+
+  // Test receiving the message through the selector
+  let assert Ok(PubSubEvent(decode_utils.UserJoined("alice"))) =
+    process.selector_receive(selector, 100)
+}
+
+// Test multi-channel actor composition with both chat and metrics
+pub fn multi_channel_actor_composition_test() {
+  // Arrange: Create pubsubs for different message types
+  let chat_pubsub =
+    pubsub.new(
+      "test_multi_channel_chat",
+      decode_utils.chat_message_decoder(),
+      decode_utils.AdminMessage("chat_decode_error"),
+    )
+
+  let metrics_pubsub =
+    pubsub.new(
+      "test_multi_channel_metrics",
+      decode_utils.metric_event_decoder(),
+      decode_utils.TimerRecord("decode_error", 0),
+    )
+
+  // Create actor with multi-channel selector
+  let command_subject = process.new_subject()
+  let selector =
+    process.new_selector()
+    |> process.select_map(command_subject, DirectCommand)
+    |> process.merge_selector(
+      pubsub.subscribe(chat_pubsub, "general")
+      |> process.map_selector(PubSubEvent),
+    )
+    |> process.merge_selector(
+      pubsub.subscribe(metrics_pubsub, "system")
+      |> process.map_selector(SystemEvent),
+    )
+
+  // Act & Assert: Test that all three channels work
+
+  // Test direct command
+  process.send(command_subject, Ping(process.new_subject()))
+  let assert Ok(DirectCommand(Ping(_))) =
+    process.selector_receive(selector, 100)
+
+  // Test chat pubsub message
+  let assert Ok(_) =
     pubsub.publish(
       chat_pubsub,
-      "mixed_channel",
-      Message("alice", "real message"),
+      "general",
+      decode_utils.Message("alice", "hello world"),
     )
-  assert chat_reached == 1
+  let assert Ok(PubSubEvent(decode_utils.Message("alice", "hello world"))) =
+    process.selector_receive(selector, 100)
 
-  // Verify chat actor received the chat message
-  let final_count =
-    actor.call(chat_actor, waiting: 1000, sending: GetMessageCount)
-  assert final_count == 1
+  // Test metrics pubsub message
+  let assert Ok(_) =
+    pubsub.publish(
+      metrics_pubsub,
+      "system",
+      decode_utils.CounterIncrement("requests", 1),
+    )
+  let assert Ok(SystemEvent(decode_utils.CounterIncrement("requests", 1))) =
+    process.selector_receive(selector, 100)
+}
 
-  // Shutdown actor
-  actor.send(chat_actor, ChatActorShutdown)
+// Test multiple subscribers receiving same message
+pub fn multiple_subscribers_test() {
+  // Arrange: Create pubsub
+  let pubsub =
+    pubsub.new(
+      "test_multiple_subscribers",
+      decode_utils.chat_message_decoder(),
+      decode_utils.AdminMessage("decode_error"),
+    )
+
+  // Create first subscriber process
+  let _subscriber1_pid =
+    process.spawn(fn() {
+      let command_subject = process.new_subject()
+      let selector =
+        process.new_selector()
+        |> process.select_map(command_subject, DirectCommand)
+        |> process.merge_selector(
+          pubsub.subscribe(pubsub, "broadcast")
+          |> process.map_selector(PubSubEvent),
+        )
+
+      // Wait for message
+      let assert Ok(PubSubEvent(decode_utils.AdminMessage(
+        "System maintenance in 5 minutes",
+      ))) = process.selector_receive(selector, 1000)
+    })
+
+  // Create second subscriber process
+  let _subscriber2_pid =
+    process.spawn(fn() {
+      let command_subject = process.new_subject()
+      let selector =
+        process.new_selector()
+        |> process.select_map(command_subject, DirectCommand)
+        |> process.merge_selector(
+          pubsub.subscribe(pubsub, "broadcast")
+          |> process.map_selector(PubSubEvent),
+        )
+
+      // Wait for message
+      let assert Ok(PubSubEvent(decode_utils.AdminMessage(
+        "System maintenance in 5 minutes",
+      ))) = process.selector_receive(selector, 1000)
+    })
+
+  // Give processes time to subscribe
+  process.sleep(50)
+
+  // Act: Publish one message
+  let message = decode_utils.AdminMessage("System maintenance in 5 minutes")
+  let assert Ok(subscriber_count) = pubsub.publish(pubsub, "broadcast", message)
+
+  // Assert: Should reach 2 subscribers
+  assert subscriber_count == 2
+
+  // Both processes should complete successfully (if they panic, the test fails)
+  Nil
+}
+
+// Test group isolation (messages to different groups don't interfere)
+pub fn group_isolation_test() {
+  // Arrange: Create pubsub and subscribe to different groups
+  let pubsub =
+    pubsub.new(
+      "test_group_isolation",
+      decode_utils.chat_message_decoder(),
+      decode_utils.AdminMessage("decode_error"),
+    )
+
+  let command_subject = process.new_subject()
+  let selector =
+    process.new_selector()
+    |> process.select_map(command_subject, DirectCommand)
+    |> process.merge_selector(
+      pubsub.subscribe(pubsub, "general")
+      |> process.map_selector(PubSubEvent),
+    )
+
+  // Publish to "private" group (different group)
+  let assert Ok(subscriber_count) =
+    pubsub.publish(
+      pubsub,
+      "private",
+      decode_utils.Message("bob", "secret message"),
+    )
+
+  // Assert: Should have 0 subscribers in private group
+  assert subscriber_count == 0
+
+  // Should not receive message in general group
+  let assert Error(_) = process.selector_receive(selector, 50)
+
+  // But should receive message sent to correct group
+  let assert Ok(general_count) =
+    pubsub.publish(
+      pubsub,
+      "general",
+      decode_utils.Message("alice", "public message"),
+    )
+  assert general_count == 1
+
+  let assert Ok(PubSubEvent(decode_utils.Message("alice", "public message"))) =
+    process.selector_receive(selector, 100)
+}
+
+// Test distributed behavior simulation (same scope works across instances)
+pub fn distributed_behavior_simulation_test() {
+  // Arrange: Create two pubsub instances with same scope (simulating different nodes)
+  let pubsub1 =
+    pubsub.new(
+      "test_distributed_pubsub",
+      decode_utils.chat_message_decoder(),
+      decode_utils.AdminMessage("decode_error"),
+    )
+
+  let pubsub2 =
+    pubsub.new(
+      "test_distributed_pubsub",
+      // Same scope = distributed behavior
+      decode_utils.chat_message_decoder(),
+      decode_utils.AdminMessage("decode_error"),
+    )
+
+  let command_subject = process.new_subject()
+  let selector =
+    process.new_selector()
+    |> process.select_map(command_subject, DirectCommand)
+    |> process.merge_selector(
+      pubsub.subscribe(pubsub1, "distributed_group")
+      |> process.map_selector(PubSubEvent),
+    )
+
+  // Act: Publish from second "node" to same group
+  let assert Ok(subscriber_count) =
+    pubsub.publish(
+      pubsub2,
+      "distributed_group",
+      decode_utils.UserJoined("distributed_user"),
+    )
+
+  // Assert: Should find the subscriber from the first "node"
+  assert subscriber_count == 1
+
+  // Subscriber should receive the message
+  let assert Ok(PubSubEvent(decode_utils.UserJoined("distributed_user"))) =
+    process.selector_receive(selector, 100)
+}
+
+// Test type safety through different scopes and decoders
+pub fn type_safety_through_scopes_test() {
+  // Arrange: Create two pubsubs with different scopes and decoders
+  let chat_pubsub =
+    pubsub.new(
+      "type_safety_chat",
+      decode_utils.chat_message_decoder(),
+      decode_utils.AdminMessage("decode_error"),
+    )
+
+  let metrics_pubsub =
+    pubsub.new(
+      "type_safety_metrics",
+      // Different scope
+      decode_utils.metric_event_decoder(),
+      decode_utils.TimerRecord("decode_error", 0),
+    )
+
+  let command_subject = process.new_subject()
+  let _base_selector =
+    process.new_selector() |> process.select_map(command_subject, DirectCommand)
+
+  // Subscribe to both with same group name but different scopes
+  let _chat_selector = pubsub.subscribe(chat_pubsub, "shared_name")
+
+  let _metrics_selector = pubsub.subscribe(metrics_pubsub, "shared_name")
+  // Same name, different scope
+
+  // Act: Publish to both scopes with same group name
+  let assert Ok(chat_count) =
+    pubsub.publish(
+      chat_pubsub,
+      "shared_name",
+      decode_utils.Message("user", "hello"),
+    )
+
+  let assert Ok(metrics_count) =
+    pubsub.publish(
+      metrics_pubsub,
+      "shared_name",
+      decode_utils.GaugeUpdate("cpu", 0.75),
+    )
+
+  // Assert: Each should only reach its own scope
+  assert chat_count == 1
+  assert metrics_count == 1
+
+  // Both should succeed without interference
+  Nil
+}
+
+// Test unsubscribe functionality
+pub fn unsubscribe_test() {
+  // Arrange: Create pubsub and subscribe
+  let pubsub =
+    pubsub.new(
+      "test_unsubscribe",
+      decode_utils.chat_message_decoder(),
+      decode_utils.AdminMessage("decode_error"),
+    )
+
+  let command_subject = process.new_subject()
+  let _base_selector =
+    process.new_selector() |> process.select_map(command_subject, DirectCommand)
+
+  let _subscriber_selector = pubsub.subscribe(pubsub, "temp_group")
+
+  // Verify subscription exists
+  let assert Ok(count_before) =
+    pubsub.publish(
+      pubsub,
+      "temp_group",
+      decode_utils.Message("test", "before unsubscribe"),
+    )
+  assert count_before == 1
+
+  // Act: Unsubscribe
+  pubsub.unsubscribe(pubsub, "temp_group")
+
+  // Assert: Should have no subscribers now
+  let assert Ok(count_after) =
+    pubsub.publish(
+      pubsub,
+      "temp_group",
+      decode_utils.Message("test", "after unsubscribe"),
+    )
+  assert count_after == 0
+}
+
+// Test error handling for invalid operations
+pub fn error_handling_test() {
+  let pubsub =
+    pubsub.new(
+      "test_errors_pubsub",
+      decode_utils.chat_message_decoder(),
+      decode_utils.AdminMessage("decode_error"),
+    )
+
+  // Test unsubscribe without subscribe - this now just succeeds silently
+  pubsub.unsubscribe(pubsub, "nonexistent_group")
+
+  // Test publish to empty group (should succeed but reach 0 subscribers)
+  let assert Ok(count) =
+    pubsub.publish(
+      pubsub,
+      "empty_group",
+      decode_utils.Message("user", "message to empty group"),
+    )
+  assert count == 0
+}
+
+// Test subscriber count and debugging functions
+pub fn subscriber_utilities_test() {
+  let pubsub =
+    pubsub.new(
+      "test_utilities",
+      decode_utils.chat_message_decoder(),
+      decode_utils.AdminMessage("decode_error"),
+    )
+
+  // Initially no subscribers
+  assert pubsub.subscriber_count(pubsub, "util_group") == 0
+  assert pubsub.subscribers(pubsub, "util_group") == []
+
+  let _selector = pubsub.subscribe(pubsub, "util_group")
+
+  // Should now have 1 subscriber
+  assert pubsub.subscriber_count(pubsub, "util_group") == 1
+
+  let subscribers = pubsub.subscribers(pubsub, "util_group")
+  assert list.length(subscribers) == 1
 }

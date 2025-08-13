@@ -1,8 +1,8 @@
+import decode_utils
 import gleam/erlang/process.{type Subject}
 import gleam/int
 import gleam/otp/actor
 import gleeunit
-import glyn
 import glyn/pubsub
 import glyn/registry
 
@@ -10,19 +10,9 @@ pub fn main() -> Nil {
   gleeunit.main()
 }
 
-// Integration test types - separate command and event types
-pub type Command {
-  ProcessOrder(id: String, reply_with: Subject(Bool))
-  GetStatus(reply_with: Subject(String))
-  GetProcessedOrders(reply_with: Subject(Int))
-  Shutdown
-}
-
-pub type Event {
-  OrderCreated(id: String, amount: Int)
-  PaymentProcessed(id: String)
-  SystemAlert(message: String)
-}
+// Use Command and Event types from decode_utils
+pub type Command = decode_utils.Command
+pub type Event = decode_utils.Event
 
 // Integration actor message type - composes commands and events
 pub type IntegrationActorMessage {
@@ -30,15 +20,6 @@ pub type IntegrationActorMessage {
   PubSubMessage(Event)
   IntegrationActorShutdown
 }
-
-// Message type constants for integration tests
-pub const command_message_type: glyn.MessageType(Command) = glyn.MessageType(
-  "Command_v1",
-)
-
-pub const event_message_type: glyn.MessageType(Event) = glyn.MessageType(
-  "Event_v1",
-)
 
 pub type IntegrationActorState {
   IntegrationActorState(status: String, processed_orders: Int)
@@ -52,7 +33,7 @@ fn handle_integration_message(
   case message {
     CommandMessage(command) ->
       case command {
-        ProcessOrder(id, reply_with) -> {
+        decode_utils.ProcessOrder(id, reply_with) -> {
           process.send(reply_with, True)
           let new_state =
             IntegrationActorState(
@@ -61,24 +42,24 @@ fn handle_integration_message(
             )
           actor.continue(new_state)
         }
-        GetStatus(reply_with) -> {
+        decode_utils.GetCommandStatus(reply_with) -> {
           process.send(reply_with, state.status)
           actor.continue(state)
         }
-        GetProcessedOrders(reply_with) -> {
+        decode_utils.GetProcessedOrders(reply_with) -> {
           process.send(reply_with, state.processed_orders)
           actor.continue(state)
         }
-        Shutdown -> {
+        decode_utils.CommandShutdown -> {
           actor.stop()
         }
       }
     PubSubMessage(event) -> {
       let new_status = case event {
-        OrderCreated(id, amount) ->
+        decode_utils.OrderCreated(id, amount) ->
           "Event: Order " <> id <> " created for $" <> int.to_string(amount)
-        PaymentProcessed(id) -> "Event: Payment processed for order " <> id
-        SystemAlert(message) -> "Alert: " <> message
+        decode_utils.PaymentProcessed(id) -> "Event: Payment processed for order " <> id
+        decode_utils.SystemAlert(message) -> "Alert: " <> message
       }
       let new_state =
         IntegrationActorState(
@@ -101,27 +82,16 @@ fn start_integration_actor(
   group: String,
 ) -> Result(actor.Started(Subject(IntegrationActorMessage)), actor.StartError) {
   actor.new_with_initialiser(5000, fn(subject) {
-    // Subscribe to PubSub for events
-    let event_subscription = pubsub.subscribe(pubsub, group, process.self())
-
-    // Create a command subject for direct commands
-    let command_subject = process.new_subject()
-
-    // Register in Registry for command handling
-    let assert Ok(_registration) =
-      registry.register(
-        registry,
-        actor_name,
-        command_subject,
-        "integration_service",
-      )
+    // Get selectors for both PubSub and Registry
+    let event_selector = pubsub.subscribe(pubsub, group)
+    let assert Ok(command_selector) = registry.register(registry, actor_name, "integration_service")
 
     // Create selector that composes both command and event messages
     let selector =
       process.new_selector()
       |> process.select(subject)
-      |> process.select_map(command_subject, CommandMessage)
-      |> process.select_map(event_subscription.subject, PubSubMessage)
+      |> process.merge_selector(process.map_selector(command_selector, CommandMessage))
+      |> process.merge_selector(process.map_selector(event_selector, PubSubMessage))
 
     let initial_state =
       IntegrationActorState(status: "Ready", processed_orders: 0)
@@ -136,13 +106,18 @@ fn start_integration_actor(
 }
 
 pub fn pubsub_registry_integration_test() {
-  // Create separate PubSub and Registry systems with different MessageTypes
+  // Create separate PubSub and Registry systems
   let event_pubsub =
-    pubsub.new(scope: "integration_events", message_type: event_message_type)
+    pubsub.new(
+      "integration_events",
+      decode_utils.event_decoder(),
+      decode_utils.SystemAlert("decode_error")
+    )
   let command_registry =
     registry.new(
-      scope: "integration_commands",
-      message_type: command_message_type,
+      "integration_commands",
+      decode_utils.command_decoder(),
+      decode_utils.CommandShutdown
     )
 
   // Start integration actor that subscribes to events and registers for commands
@@ -161,7 +136,7 @@ pub fn pubsub_registry_integration_test() {
       command_registry,
       "order_processor",
       waiting: 1000,
-      sending: fn(reply_with) { ProcessOrder("ord-123", reply_with) },
+      sending: decode_utils.ProcessOrder("ord-123", _),
     )
   assert process_result == True
 
@@ -171,7 +146,7 @@ pub fn pubsub_registry_integration_test() {
       command_registry,
       "order_processor",
       waiting: 1000,
-      sending: fn(reply_with) { GetStatus(reply_with) },
+      sending: decode_utils.GetCommandStatus(_)
     )
   assert status1 == "Processing order ord-123"
 
@@ -180,13 +155,13 @@ pub fn pubsub_registry_integration_test() {
       command_registry,
       "order_processor",
       waiting: 1000,
-      sending: fn(reply_with) { GetProcessedOrders(reply_with) },
+      sending: decode_utils.GetProcessedOrders(_),
     )
   assert order_count1 == 1
 
   // Test event through PubSub
-  let event_subscribers =
-    pubsub.publish(event_pubsub, "order_events", OrderCreated("ord-456", 250))
+  let assert Ok(event_subscribers) =
+    pubsub.publish(event_pubsub, "order_events", decode_utils.OrderCreated("ord-456", 250))
   assert event_subscribers == 1
 
   // Verify event was handled
@@ -195,7 +170,7 @@ pub fn pubsub_registry_integration_test() {
       command_registry,
       "order_processor",
       waiting: 1000,
-      sending: fn(reply_with) { GetStatus(reply_with) },
+      sending: decode_utils.GetCommandStatus(_),
     )
   assert status2 == "Event: Order ord-456 created for $250"
 
@@ -205,20 +180,20 @@ pub fn pubsub_registry_integration_test() {
       command_registry,
       "order_processor",
       waiting: 1000,
-      sending: fn(reply_with) { GetProcessedOrders(reply_with) },
+      sending: decode_utils.GetProcessedOrders(_),
     )
   assert order_count2 == 1
 
   // Test more events
-  let payment_subscribers =
-    pubsub.publish(event_pubsub, "order_events", PaymentProcessed("ord-456"))
+  let assert Ok(payment_subscribers) =
+    pubsub.publish(event_pubsub, "order_events", decode_utils.PaymentProcessed("ord-456"))
   assert payment_subscribers == 1
 
-  let alert_subscribers =
+  let assert Ok(alert_subscribers) =
     pubsub.publish(
       event_pubsub,
       "order_events",
-      SystemAlert("System maintenance in 10 minutes"),
+      decode_utils.SystemAlert("System maintenance in 10 minutes"),
     )
   assert alert_subscribers == 1
 
@@ -228,7 +203,7 @@ pub fn pubsub_registry_integration_test() {
       command_registry,
       "order_processor",
       waiting: 1000,
-      sending: fn(reply_with) { GetStatus(reply_with) },
+      sending: decode_utils.GetCommandStatus(_),
     )
   assert final_status == "Alert: System maintenance in 10 minutes"
 
@@ -238,7 +213,7 @@ pub fn pubsub_registry_integration_test() {
       command_registry,
       "order_processor",
       waiting: 1000,
-      sending: fn(reply_with) { ProcessOrder("ord-789", reply_with) },
+      sending: decode_utils.ProcessOrder("ord-789", _),
     )
   assert process_result2 == True
 
@@ -248,7 +223,7 @@ pub fn pubsub_registry_integration_test() {
       command_registry,
       "order_processor",
       waiting: 1000,
-      sending: fn(reply_with) { GetProcessedOrders(reply_with) },
+      sending: decode_utils.GetProcessedOrders(_),
     )
   assert final_order_count == 2
 
