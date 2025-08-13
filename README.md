@@ -44,15 +44,6 @@ pub type Command {
   Shutdown
 }
 
-// Helper for decoding record tags
-fn expect_atom(expected: String) -> decode.Decoder(atom.Atom) {
-  use value <- decode.then(atom.decoder())
-  case atom.to_string(value) == expected {
-    True -> decode.success(value)
-    False -> decode.failure(value, "Expected atom: " <> expected)
-  }
-}
-
 // Helper function to match specific atoms
 fn expect_atom(expected: String) -> decode.Decoder(atom.Atom) {
   use value <- decode.then(atom.decoder())
