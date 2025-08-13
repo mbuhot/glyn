@@ -1,4 +1,4 @@
-////  Glyn Registry 2.0.0 - Selector-Based Type-Safe Process Registry
+////  Glyn Registry - Selector-Based Type-Safe Process Registry
 ////
 ////  This module provides a selector-based wrapper around Erlang's `syn` process registry,
 ////  enabling distributed service discovery and direct process communication with
@@ -9,16 +9,56 @@
 ////  The registry seamlessly composes with other message channels using selectors:
 ////
 ////  ```gleam
+////  import gleam/dynamic.{type Dynamic}
+////  import gleam/dynamic/decode
+////  import gleam/erlang/atom
+////  import gleam/erlang/process.{type Subject}
 ////  import gleam/otp/actor
-////  import gleam/erlang/process
 ////  import glyn/registry
 ////  import glyn/pubsub
-////  import my_app/decode_utils
+////
+////  // Define your message types
+////  pub type ServiceMessage {
+////    ProcessOrder(id: String, reply_with: Subject(Bool))
+////    GetStatus(reply_with: Subject(String))
+////    Shutdown
+////  }
+////
+////  pub type SystemEvent {
+////    ServiceStarted(name: String)
+////    ServiceStopped(name: String)
+////  }
 ////
 ////  pub type ActorMessage {
-////    DirectCommand(UserCommand)    // Direct commands
-////    RegistryMessage(ServiceRequest)  // Registry messages (decoded)
-////    PubSubEvent(SystemEvent)         // PubSub events
+////    DirectCommand(String)             // Direct commands
+////    RegistryMessage(ServiceMessage)   // Registry messages (decoded)
+////    PubSubEvent(SystemEvent)          // PubSub events
+////  }
+////
+////  // Create decoders for your message types
+////  fn expect_atom(expected: String) -> decode.Decoder(atom.Atom) {
+////    use value <- decode.then(atom.decoder())
+////    case atom.to_string(value) == expected {
+////      True -> decode.success(value)
+////      False -> decode.failure(value, "Expected atom: " <> expected)
+////    }
+////  }
+////
+////  fn service_message_decoder() -> decode.Decoder(ServiceMessage) {
+////    decode.one_of(
+////      {
+////        use _ <- decode.field(0, expect_atom("shutdown"))
+////        decode.success(Shutdown)
+////      },
+////      or: [
+////        {
+////          use _ <- decode.field(0, expect_atom("get_status"))
+////          use reply_with <- decode.field(1, subject_decoder())
+////          decode.success(GetStatus(reply_with))
+////        },
+////        // Add other variants as needed
+////      ]
+////    )
 ////  }
 ////
 ////  fn start_multi_channel_actor() {
@@ -32,27 +72,31 @@
 ////
 ////      // Add registry channel
 ////      let user_registry = registry.new(
-////        "user_services",
-////        decode_utils.service_message_decoder(),
-////        decode_utils.Shutdown
+////        scope: "user_services",
+////        decoder: service_message_decoder(),
+////        error_default: Shutdown
 ////      )
 ////      let assert Ok(registry_selector) = registry.register(
 ////        user_registry,
-////        "user_actor",
-////        "service_v1"
+////        "order_processor",
+////        "v1.0"
 ////      )
 ////      let with_registry = base_selector
-////        |> process.merge_selector(process.map_selector(registry_selector, RegistryMessage))
+////        |> process.merge_selector(
+////          process.map_selector(registry_selector, RegistryMessage)
+////        )
 ////
-////      // Add pubsub channel
+////      // Add pubsub channel for system events
 ////      let system_pubsub = pubsub.new(
-////        "system_events",
-////        decode_utils.decode_system_event,
-////        decode_utils.DefaultEvent
+////        scope: "system_events",
+////        decoder: system_event_decoder(),
+////        error_default: ServiceStarted("unknown")
 ////      )
-////      let pubsub_selector = pubsub.subscribe(system_pubsub, "notifications")
+////      let pubsub_selector = pubsub.subscribe(system_pubsub, "services")
 ////      let final_selector = with_registry
-////        |> process.merge_selector(process.map_selector(pubsub_selector, PubSubEvent))
+////        |> process.merge_selector(
+////          process.map_selector(pubsub_selector, PubSubEvent)
+////        )
 ////
 ////      actor.initialised(initial_state)
 ////      |> actor.selecting(final_selector)
@@ -60,6 +104,28 @@
 ////      |> Ok
 ////    })
 ////  }
+////
+////  // Send messages to registered services
+////  let user_registry = registry.new(
+////    scope: "user_services",
+////    decoder: service_message_decoder(),
+////    error_default: Shutdown
+////  )
+////
+////  // Send a message
+////  let assert Ok(_) = registry.send(
+////    user_registry,
+////    "order_processor",
+////    ProcessOrder("order-123", reply_subject)
+////  )
+////
+////  // Make a call and wait for reply
+////  let assert Ok(status) = registry.call(
+////    user_registry,
+////    "order_processor",
+////    waiting: 5000,
+////    sending: GetStatus(_)
+////  )
 ////  ```
 
 import gleam/dynamic.{type Dynamic}
@@ -113,6 +179,7 @@ pub opaque type Registry(message, metadata) {
 
 /// Registration errors
 pub type RegistryError {
+  Timeout
   ProcessNotFound(name: String)
   RegistrationFailed(reason: String)
   UnregistrationFailed(reason: String)
@@ -222,22 +289,17 @@ pub fn call(
   waiting timeout: Int,
   sending message_fn: fn(Subject(reply)) -> message,
 ) -> Result(reply, RegistryError) {
-  case whereis(registry, actor_name) {
-    Ok(#(_pid, _metadata)) -> {
-      // Create a temporary subject for the reply
-      let reply_subject = process.new_subject()
-      let message = message_fn(reply_subject)
+  // Create a temporary subject for the reply
+  let reply_subject = process.new_subject()
+  let message = message_fn(reply_subject)
 
-      // Send the message
-      case send(registry, actor_name, message) {
-        Ok(_) -> {
-          // Wait for reply
-          case process.receive(reply_subject, timeout) {
-            Ok(reply) -> Ok(reply)
-            Error(_) -> Error(RegistrationFailed("call failed"))
-          }
-        }
-        Error(error) -> Error(error)
+  // Send the message
+  case send(registry, actor_name, message) {
+    Ok(_) -> {
+      // Wait for reply
+      case process.receive(reply_subject, timeout) {
+        Ok(reply) -> Ok(reply)
+        Error(Nil) -> Error(Timeout)
       }
     }
     Error(error) -> Error(error)

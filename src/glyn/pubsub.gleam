@@ -1,4 +1,4 @@
-////  Glyn PubSub 2.0.0 - Selector-Based Type-Safe Event Streaming
+////  Glyn PubSub - Selector-Based Type-Safe Event Streaming
 ////
 ////  This module provides a selector-based wrapper around Erlang's `syn` PubSub system,
 ////  enabling distributed event streaming and one-to-many message broadcasting with
@@ -9,15 +9,77 @@
 ////  PubSub seamlessly composes with other message channels using selectors:
 ////
 ////  ```gleam
+////  import gleam/dynamic.{type Dynamic}
+////  import gleam/dynamic/decode
+////  import gleam/erlang/atom
+////  import gleam/erlang/process.{type Subject}
 ////  import gleam/otp/actor
-////  import gleam/erlang/process
 ////  import glyn/pubsub
-////  import glyn/decode_utils
+////  import glyn/registry
+////
+////  // Define your event types
+////  pub type ChatMessage {
+////    UserJoined(username: String)
+////    UserLeft(username: String)
+////    Message(username: String, content: String)
+////  }
+////
+////  pub type MetricEvent {
+////    CounterIncrement(name: String, value: Int)
+////    GaugeUpdate(name: String, value: Float)
+////  }
 ////
 ////  pub type ActorMessage {
-////    DirectCommand(UserCommand)    // Direct commands
-////    PubSubEvent(ChatMessage)      // PubSub events (decoded)
-////    SystemEvent(MetricEvent)      // Another PubSub channel
+////    DirectCommand(String)           // Direct commands
+////    ChatEvent(ChatMessage)          // Chat PubSub events
+////    MetricEvent(MetricEvent)        // Metrics PubSub events
+////  }
+////
+////  // Create decoders for your event types
+////  fn expect_atom(expected: String) -> decode.Decoder(atom.Atom) {
+////    use value <- decode.then(atom.decoder())
+////    case atom.to_string(value) == expected {
+////      True -> decode.success(value)
+////      False -> decode.failure(value, "Expected atom: " <> expected)
+////    }
+////  }
+////
+////  fn chat_message_decoder() -> decode.Decoder(ChatMessage) {
+////    decode.one_of(
+////      {
+////        use _ <- decode.field(0, expect_atom("user_joined"))
+////        use username <- decode.field(1, decode.string)
+////        decode.success(UserJoined(username))
+////      },
+////      or: [
+////        {
+////          use _ <- decode.field(0, expect_atom("message"))
+////          use username <- decode.field(1, decode.string)
+////          use content <- decode.field(2, decode.string)
+////          decode.success(Message(username, content))
+////        },
+////        // Add other variants as needed
+////      ]
+////    )
+////  }
+////
+////  fn metric_event_decoder() -> decode.Decoder(MetricEvent) {
+////    decode.one_of(
+////      {
+////        use _ <- decode.field(0, expect_atom("counter_increment"))
+////        use name <- decode.field(1, decode.string)
+////        use value <- decode.field(2, decode.int)
+////        decode.success(CounterIncrement(name, value))
+////      },
+////      or: [
+////        {
+////          use _ <- decode.field(0, expect_atom("gauge_update"))
+////          use name <- decode.field(1, decode.string)
+////          use value <- decode.field(2, decode.float)
+////          decode.success(GaugeUpdate(name, value))
+////        },
+////      ]
+////    )
 ////  }
 ////
 ////  fn start_multi_channel_actor() {
@@ -31,23 +93,27 @@
 ////
 ////      // Add chat PubSub channel
 ////      let chat_pubsub = pubsub.new(
-////        "chat_scope",
-////        decode_utils.chat_message_decoder(),
-////        decode_utils.AdminMessage("decode_error")
+////        scope: "chat_events",
+////        decoder: chat_message_decoder(),
+////        error_default: UserJoined("unknown")
 ////      )
 ////      let chat_selector = pubsub.subscribe(chat_pubsub, "general")
 ////      let with_chat = base_selector
-////        |> process.merge_selector(process.map_selector(chat_selector, PubSubEvent))
+////        |> process.merge_selector(
+////          process.map_selector(chat_selector, ChatEvent)
+////        )
 ////
 ////      // Add metrics PubSub channel
 ////      let metrics_pubsub = pubsub.new(
-////        "metrics_scope",
-////        decode_utils.metric_event_decoder(),
-////        decode_utils.TimerRecord("decode_error", 0)
+////        scope: "metrics_events",
+////        decoder: metric_event_decoder(),
+////        error_default: CounterIncrement("unknown", 0)
 ////      )
 ////      let metrics_selector = pubsub.subscribe(metrics_pubsub, "system")
 ////      let final_selector = with_chat
-////        |> process.merge_selector(process.map_selector(metrics_selector, SystemEvent))
+////        |> process.merge_selector(
+////          process.map_selector(metrics_selector, MetricEvent)
+////        )
 ////
 ////      actor.initialised(initial_state)
 ////      |> actor.selecting(final_selector)
@@ -55,6 +121,23 @@
 ////      |> Ok
 ////    })
 ////  }
+////
+////  // Publishing events to subscribers
+////  let chat_pubsub = pubsub.new(
+////    scope: "chat_events",
+////    decoder: chat_message_decoder(),
+////    error_default: UserJoined("unknown")
+////  )
+////
+////  // Publish a chat message to all subscribers in "general" channel
+////  let assert Ok(subscriber_count) = pubsub.publish(
+////    chat_pubsub,
+////    "general",
+////    Message("alice", "Hello everyone!")
+////  )
+////
+////  // Check how many subscribers received the message
+////  let count = pubsub.subscriber_count(chat_pubsub, "general")
 ////  ```
 
 import gleam/dynamic.{type Dynamic}
