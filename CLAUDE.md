@@ -327,12 +327,22 @@ pub fn whereis(...) -> Result(...) {
   // Always fail for now
   Error("not implemented")
 }
+
+// WRONG - Simulating distributed behavior in single process
+let pubsub_node1 = pubsub.new("scope", ...)
+let pubsub_node2 = pubsub.new("scope", ...)  // This is NOT clustering!
+
+// WRONG - Returning fake values to make tests pass
+pub fn publish(...) -> Int { 0 }  // Hardcoded fake result
+pub fn subscribers(...) -> List(Pid) { [] }  // Empty fake list
 ```
 
 **CORRECT APPROACH:**
 - Implement real functionality, even if minimal
 - If stuck on FFI or complex logic, STOP and ask for guidance
 - Never fake test passes - they must be genuine functionality
+- If you don't understand distributed systems concepts, STOP and ask
+- NEVER fake distributed behavior - it must be real or not at all
 
 ## Project Workflow
 
@@ -351,13 +361,50 @@ pub fn whereis(...) -> Result(...) {
 - [ ] Is the API self-documenting?
 - [ ] Does this handle the separation between syn (runtime) and types (compile-time)?
 
+### 8. **Stop and Verify Understanding (Distributed Systems)**
+**Problem**: Proceeding with implementation when core concepts are misunderstood.
+**Solution**: When encountering distributed systems, networking, or clustering concepts:
+
+- **STOP immediately** and state your understanding in plain terms
+- **ASK for confirmation** before implementing anything  
+- **NEVER proceed** with implementation if you're not 100% certain of the concepts
+- **Example**: "My understanding is that Erlang clustering means X. Is this correct before I proceed?"
+
+### 9. **Source Code First**
+**Problem**: Guessing APIs and function signatures instead of reading actual source.
+**Solution**: When working with external APIs or libraries:
+
+1. **ALWAYS read the actual source code first** (user will point you to it)
+2. **NEVER guess** function signatures, return types, or behavior  
+3. **If source isn't available**, ask for documentation or examples
+4. **State what you found** in the source before implementing
+
+### 10. **Minimal Means Minimal**
+**Problem**: Adding complexity when user explicitly asks for minimal approach.
+**Solution**: When user says "minimal" or "start over":
+
+- **Implement the absolute minimum** required to test the specific concept
+- **Do not add** features, error handling, or comprehensive examples
+- **Ask "Is this minimal enough?"** before adding any complexity
+- **One concept per iteration**
+
+### 11. **Success Verification**
+**Problem**: Claiming things are "working" when they're actually failing.
+**Solution**: Before claiming anything is "working":
+
+- **State exactly what evidence** proves success
+- **Distinguish between expected behavior and actual observed behavior**
+- **If you see errors or failures**, that likely means it's NOT working
+- **Ask user to confirm** if ambiguous results indicate success
+
 ### When Stuck:
 - **Don't hack around problems** - Ask for guidance on proper patterns
 - **Don't use global state** - Use proper message passing
 - **Don't skip testing** - Especially for distributed scenarios
-- **Don't assume APIs** - Research Erlang documentation
+- **Don't assume APIs** - Research Erlang documentation or READ THE SOURCE CODE
 - **NEVER implement dummy/fake functionality** - Stop and ask for help instead
 - **NEVER remove real implementations** - If something doesn't work, debug it properly or ask for guidance
+- **STOP and verify understanding** - Especially for distributed systems concepts
 
 ---
 

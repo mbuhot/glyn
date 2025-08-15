@@ -100,38 +100,40 @@ pub fn service_message_decoder() -> decode.Decoder(ServiceMessage) {
 
 /// SystemCommand decoder
 pub fn system_command_decoder() -> decode.Decoder(SystemCommand) {
-  decode.one_of(
-    // StartSystem variant
-    {
-      use _ <- decode.field(0, expect_atom("start_system"))
-      use reply_with <- decode.field(1, subject_decoder())
-      decode.success(StartSystem(reply_with))
-    },
-    or: [
-      // StopSystem variant
-      {
-        use _ <- decode.field(0, expect_atom("stop_system"))
-        decode.success(StopSystem)
-      },
-      // RestartSystem variant
-      {
-        use _ <- decode.field(0, expect_atom("restart_system"))
-        decode.success(RestartSystem)
-      },
-      // GetSystemInfo variant
-      {
-        use _ <- decode.field(0, expect_atom("get_system_info"))
-        use reply_with <- decode.field(1, subject_decoder())
-        decode.success(GetSystemInfo(reply_with))
-      },
-      // SetLogLevel variant
-      {
-        use _ <- decode.field(0, expect_atom("set_log_level"))
-        use level <- decode.field(1, decode.string)
-        decode.success(SetLogLevel(level))
-      },
-    ],
-  )
+  let start_system = {
+    use _ <- decode.field(0, expect_atom("start_system"))
+    use reply_with <- decode.field(1, subject_decoder())
+    decode.success(StartSystem(reply_with))
+  }
+
+  let stop_system = {
+    use _ <- decode.field(0, expect_atom("stop_system"))
+    decode.success(StopSystem)
+  }
+
+  let restart_system = {
+    use _ <- decode.field(0, expect_atom("restart_system"))
+    decode.success(RestartSystem)
+  }
+
+  let get_system_info = {
+    use _ <- decode.field(0, expect_atom("get_system_info"))
+    use reply_with <- decode.field(1, subject_decoder())
+    decode.success(GetSystemInfo(reply_with))
+  }
+
+  let set_log_level = {
+    use _ <- decode.field(0, expect_atom("set_log_level"))
+    use level <- decode.field(1, decode.string)
+    decode.success(SetLogLevel(level))
+  }
+
+  decode.one_of(start_system, or: [
+    stop_system,
+    restart_system,
+    get_system_info,
+    set_log_level,
+  ])
 }
 
 /// ChatMessage decoder
