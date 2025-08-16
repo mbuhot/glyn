@@ -95,7 +95,6 @@
 ////      let chat_pubsub = pubsub.new(
 ////        scope: "chat_events",
 ////        decoder: chat_message_decoder(),
-////        error_default: UserJoined("unknown")
 ////      )
 ////      let chat_selector = pubsub.subscribe(chat_pubsub, "general")
 ////      let with_chat = base_selector
@@ -106,8 +105,7 @@
 ////      // Add metrics PubSub channel
 ////      let metrics_pubsub = pubsub.new(
 ////        scope: "metrics_events",
-////        decoder: metric_event_decoder(),
-////        error_default: CounterIncrement("unknown", 0)
+////        decoder: metric_event_decoder()
 ////      )
 ////      let metrics_selector = pubsub.subscribe(metrics_pubsub, "system")
 ////      let final_selector = with_chat
@@ -126,7 +124,6 @@
 ////  let chat_pubsub = pubsub.new(
 ////    scope: "chat_events",
 ////    decoder: chat_message_decoder(),
-////    error_default: UserJoined("unknown")
 ////  )
 ////
 ////  // Publish a chat message to all subscribers in "general" channel
@@ -143,8 +140,9 @@
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/erlang/atom
-import gleam/erlang/process.{type Pid, type Selector}
-import gleam/result
+import gleam/erlang/process.{type Pid, type Selector, type Subject}
+import gleam/erlang/reference
+import gleam/otp/actor
 import gleam/string
 
 type SynResult
@@ -164,8 +162,18 @@ fn syn_leave(scope: atom.Atom, group: group, pid: Pid) -> SynResult
 @external(erlang, "syn", "members")
 fn syn_members(scope: atom.Atom, group: group) -> List(Pid)
 
+@external(erlang, "syn", "local_member_count")
+fn syn_local_member_count(scope: atom.Atom, group: group) -> Int
+
 @external(erlang, "syn", "publish")
 fn syn_publish(
+  scope: atom.Atom,
+  group: group,
+  message: message,
+) -> Result(Int, Dynamic)
+
+@external(erlang, "syn", "local_publish")
+fn syn_local_publish(
   scope: atom.Atom,
   group: group,
   message: message,
@@ -186,7 +194,7 @@ pub opaque type PubSub(message) {
   PubSub(
     scope: atom.Atom,
     decoder: decode.Decoder(message),
-    error_default: message,
+    tag: reference.Reference,
   )
 }
 
@@ -195,43 +203,86 @@ pub type PubSubError {
 }
 
 /// Create a new PubSub system for a given scope with dynamic decoding
-pub fn new(
-  scope: String,
-  decoder: decode.Decoder(message),
-  error_default: message,
-) -> PubSub(message) {
+pub fn new(scope: String, decoder: decode.Decoder(message)) -> PubSub(message) {
   let scope = atom.create(scope)
   syn_add_node_to_scopes([scope])
-  PubSub(scope:, decoder:, error_default:)
+  let tag = reference.new()
+  PubSub(scope:, decoder:, tag: tag)
 }
 
 /// Subscribe to a PubSub group and compose into a selector
 /// Creates an internal Subject(Dynamic) and uses select_map for type safety
 pub fn subscribe(
   pubsub pubsub: PubSub(message),
-  group group: String,
+  group group: group,
 ) -> Selector(message) {
   let current_pid = process.self()
-  let group_tag = to_dynamic(group)
 
-  // Join the group with the current process
-  let assert Ok(Nil) = syn_join(pubsub.scope, group, current_pid) |> to_result()
-  let dynamic_subject = process.unsafely_create_subject(current_pid, group_tag)
+  case syn_local_member_count(pubsub.scope, group) {
+    0 -> {
+      let assert Ok(_) = start_decoder_actor(pubsub, group)
+      Nil
+    }
+    _ -> Nil
+  }
+
+  // Join a tagged group with the current process
+  let assert Ok(Nil) =
+    syn_join(pubsub.scope, #(pubsub.tag, group), current_pid) |> to_result()
+
+  // Return selector accepting typed messages tagged with this pubsubs internal private tag
+  let subject =
+    process.unsafely_create_subject(current_pid, to_dynamic(pubsub.tag))
   process.new_selector()
-  |> process.select_map(dynamic_subject, fn(dynamic) {
-    decode.run(dynamic, pubsub.decoder)
-    |> result.unwrap(pubsub.error_default)
+  |> process.select(subject)
+}
+
+fn start_decoder_actor(
+  pubsub: PubSub(message),
+  group: group,
+) -> Result(actor.Started(Subject(Dynamic)), actor.StartError) {
+  actor.new_with_initialiser(5000, fn(subject: Subject(Dynamic)) {
+    let assert Ok(pid) = process.subject_owner(subject)
+    syn_join(pubsub.scope, group, pid)
+    let selector: Selector(Dynamic) =
+      process.new_selector()
+      |> process.select_other(fn(dynamic) { dynamic })
+
+    actor.initialised(#(pubsub, group))
+    |> actor.selecting(selector)
+    |> actor.returning(subject)
+    |> Ok
   })
+  |> actor.on_message(decode_message)
+  |> actor.start()
+}
+
+fn decode_message(
+  state: #(PubSub(message), group),
+  message: Dynamic,
+) -> actor.Next(#(PubSub(message), group), Dynamic) {
+  let #(pubsub, group) = state
+  case decode.run(message, pubsub.decoder) {
+    Ok(decoded) -> {
+      case local_publish(pubsub, group, decoded) {
+        Ok(0) -> actor.stop()
+        Ok(_) -> actor.continue(state)
+        Error(_e) -> {
+          actor.continue(state)
+        }
+      }
+    }
+    Error(_e) -> {
+      actor.continue(state)
+    }
+  }
 }
 
 /// Unsubscribe from a PubSub group
-pub fn unsubscribe(pubsub: PubSub(message), group: String) -> Nil {
+pub fn unsubscribe(pubsub: PubSub(message), group: group) -> Nil {
   let current_pid = process.self()
-  case syn_leave(pubsub.scope, group, current_pid) |> to_result() {
-    Ok(Nil) -> Nil
-    Error(_) -> Nil
-    // NotInGroup is OK - already unsubscribed
-  }
+  syn_leave(pubsub.scope, #(pubsub.tag, group), current_pid)
+  Nil
 }
 
 /// Publish a type-safe message to all subscribers of a group
@@ -239,14 +290,31 @@ pub fn publish(
   pubsub: PubSub(message),
   group: String,
   message: message,
+) -> Result(Nil, PubSubError) {
+  // Publish the tagged message through syn
+  case syn_publish(pubsub.scope, group, to_dynamic(message)) {
+    Ok(_) -> Ok(Nil)
+    Error(reason) ->
+      Error(PublishFailed("publish failed: " <> string.inspect(reason)))
+  }
+}
+
+pub fn local_publish(
+  pubsub: PubSub(message),
+  group: group,
+  message: message,
 ) -> Result(Int, PubSubError) {
-  let group_tag = to_dynamic(group)
-  // Create the tagged message that matches what the subject expects
-  let tagged_message = #(group_tag, message)
+  let tagged_message = #(pubsub.tag, message)
 
   // Publish the tagged message through syn
-  case syn_publish(pubsub.scope, group, to_dynamic(tagged_message)) {
-    Ok(subscriber_count) -> Ok(subscriber_count)
+  case
+    syn_local_publish(
+      pubsub.scope,
+      #(pubsub.tag, group),
+      to_dynamic(tagged_message),
+    )
+  {
+    Ok(count) -> Ok(count)
     Error(reason) ->
       Error(PublishFailed("publish failed: " <> string.inspect(reason)))
   }

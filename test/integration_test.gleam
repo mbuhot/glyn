@@ -22,10 +22,15 @@ pub type IntegrationActorMessage {
   CommandMessage(Command)
   PubSubMessage(Event)
   IntegrationActorShutdown
+  SetConfirmationSubject(Subject(String))
 }
 
 pub type IntegrationActorState {
-  IntegrationActorState(status: String, processed_orders: Int)
+  IntegrationActorState(
+    status: String,
+    processed_orders: Int,
+    confirmation_subject: Result(Subject(String), Nil),
+  )
 }
 
 // Handler for integration actor that processes both commands and events
@@ -42,6 +47,7 @@ fn handle_integration_message(
             IntegrationActorState(
               status: "Processing order " <> id,
               processed_orders: state.processed_orders + 1,
+              confirmation_subject: state.confirmation_subject,
             )
           actor.continue(new_state)
         }
@@ -69,7 +75,20 @@ fn handle_integration_message(
         IntegrationActorState(
           status: new_status,
           processed_orders: state.processed_orders,
+          confirmation_subject: state.confirmation_subject,
         )
+
+      // Send confirmation if test is waiting for it
+      case state.confirmation_subject {
+        Ok(subject) -> process.send(subject, new_status)
+        Error(_) -> Nil
+      }
+
+      actor.continue(new_state)
+    }
+    SetConfirmationSubject(subject) -> {
+      let new_state =
+        IntegrationActorState(..state, confirmation_subject: Ok(subject))
       actor.continue(new_state)
     }
     IntegrationActorShutdown -> {
@@ -105,7 +124,11 @@ fn start_integration_actor(
       ))
 
     let initial_state =
-      IntegrationActorState(status: "Ready", processed_orders: 0)
+      IntegrationActorState(
+        status: "Ready",
+        processed_orders: 0,
+        confirmation_subject: Error(Nil),
+      )
 
     actor.initialised(initial_state)
     |> actor.selecting(selector)
@@ -119,11 +142,7 @@ fn start_integration_actor(
 pub fn pubsub_registry_integration_test() {
   // Create separate PubSub and Registry systems
   let event_pubsub =
-    pubsub.new(
-      "integration_events",
-      decode_utils.event_decoder(),
-      decode_utils.SystemAlert("decode_error"),
-    )
+    pubsub.new("integration_events", decode_utils.event_decoder())
   let command_registry =
     registry.new(
       "integration_commands",
@@ -170,14 +189,20 @@ pub fn pubsub_registry_integration_test() {
     )
   assert order_count1 == 1
 
-  // Test event through PubSub
-  let assert Ok(event_subscribers) =
+  // Test event through PubSub with confirmation pattern
+  let confirmation_subject = process.new_subject()
+  process.send(actor_subject, SetConfirmationSubject(confirmation_subject))
+
+  let assert Ok(Nil) =
     pubsub.publish(
       event_pubsub,
       "order_events",
       decode_utils.OrderCreated("ord-456", 250),
     )
-  assert event_subscribers == 1
+
+  // Wait for confirmation that event was processed
+  let assert Ok("Event: Order ord-456 created for $250") =
+    process.receive(confirmation_subject, 1000)
 
   // Verify event was handled
   let assert Ok(status2) =
@@ -200,21 +225,35 @@ pub fn pubsub_registry_integration_test() {
   assert order_count2 == 1
 
   // Test more events
-  let assert Ok(payment_subscribers) =
+  // Test PaymentProcessed event with confirmation
+  let payment_confirmation = process.new_subject()
+  process.send(actor_subject, SetConfirmationSubject(payment_confirmation))
+
+  let assert Ok(Nil) =
     pubsub.publish(
       event_pubsub,
       "order_events",
       decode_utils.PaymentProcessed("ord-456"),
     )
-  assert payment_subscribers == 1
 
-  let assert Ok(alert_subscribers) =
+  // Wait for confirmation that payment event was processed
+  let assert Ok("Event: Payment processed for order ord-456") =
+    process.receive(payment_confirmation, 1000)
+
+  // Test SystemAlert event with confirmation
+  let alert_confirmation = process.new_subject()
+  process.send(actor_subject, SetConfirmationSubject(alert_confirmation))
+
+  let assert Ok(Nil) =
     pubsub.publish(
       event_pubsub,
       "order_events",
       decode_utils.SystemAlert("System maintenance in 10 minutes"),
     )
-  assert alert_subscribers == 1
+
+  // Wait for confirmation that alert event was processed
+  let assert Ok("Alert: System maintenance in 10 minutes") =
+    process.receive(alert_confirmation, 1000)
 
   // Verify final alert was processed
   let assert Ok(final_status) =

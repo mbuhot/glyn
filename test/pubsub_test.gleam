@@ -1,6 +1,7 @@
 import decode_utils
 import gleam/erlang/process.{type Subject}
 import gleam/list
+import gleam/string
 import gleeunit
 import glyn/pubsub
 
@@ -29,7 +30,6 @@ pub fn basic_subscription_with_selector_test() {
     pubsub.new(
       "test_basic_pubsub_selector",
       decode_utils.chat_message_decoder(),
-      decode_utils.AdminMessage("decode_error"),
     )
 
   // Create base selector for direct commands
@@ -44,11 +44,7 @@ pub fn basic_subscription_with_selector_test() {
 
   // Publish a message to the group
   let message = decode_utils.UserJoined("alice")
-  let assert Ok(subscriber_count) =
-    pubsub.publish(pubsub, "test_group", message)
-
-  // Assert: Should have 1 subscriber
-  assert subscriber_count == 1
+  let assert Ok(Nil) = pubsub.publish(pubsub, "test_group", message)
 
   // Test receiving the message through the selector
   let assert Ok(PubSubEvent(decode_utils.UserJoined("alice"))) =
@@ -59,17 +55,12 @@ pub fn basic_subscription_with_selector_test() {
 pub fn multi_channel_actor_composition_test() {
   // Arrange: Create pubsubs for different message types
   let chat_pubsub =
-    pubsub.new(
-      "test_multi_channel_chat",
-      decode_utils.chat_message_decoder(),
-      decode_utils.AdminMessage("chat_decode_error"),
-    )
+    pubsub.new("test_multi_channel_chat", decode_utils.chat_message_decoder())
 
   let metrics_pubsub =
     pubsub.new(
       "test_multi_channel_metrics",
       decode_utils.metric_event_decoder(),
-      decode_utils.TimerRecord("decode_error", 0),
     )
 
   // Create actor with multi-channel selector
@@ -118,11 +109,7 @@ pub fn multi_channel_actor_composition_test() {
 pub fn multiple_subscribers_test() {
   // Arrange: Create pubsub
   let pubsub =
-    pubsub.new(
-      "test_multiple_subscribers",
-      decode_utils.chat_message_decoder(),
-      decode_utils.AdminMessage("decode_error"),
-    )
+    pubsub.new("test_multiple_subscribers", decode_utils.chat_message_decoder())
 
   // Create confirmation subject to receive results from spawned processes
   let confirmation_subject = process.new_subject()
@@ -168,27 +155,29 @@ pub fn multiple_subscribers_test() {
 
   // Act: Publish one message
   let message = decode_utils.AdminMessage("System maintenance in 5 minutes")
-  let assert Ok(subscriber_count) = pubsub.publish(pubsub, "broadcast", message)
+  let assert Ok(Nil) = pubsub.publish(pubsub, "broadcast", message)
 
   // Assert: Should reach 2 subscribers
-  assert subscriber_count == 2
+  // FIXME: publish no longer returns subscriber count
+  // assert subscriber_count == 2
 
   // Receive confirmations from both processes
-  let assert Ok(#("subscriber1", "System maintenance in 5 minutes")) =
-    process.receive(confirmation_subject, 1000)
-  let assert Ok(#("subscriber2", "System maintenance in 5 minutes")) =
-    process.receive(confirmation_subject, 1000)
+  let assert Ok(m1) = process.receive(confirmation_subject, 1000)
+  let assert Ok(m2) = process.receive(confirmation_subject, 1000)
+
+  let expected = [
+    #("subscriber1", "System maintenance in 5 minutes"),
+    #("subscriber2", "System maintenance in 5 minutes"),
+  ]
+  let sorted = list.sort([m1, m2], fn(x, y) { string.compare(x.0, y.0) })
+  assert sorted == expected
 }
 
 // Test group isolation (messages to different groups don't interfere)
 pub fn group_isolation_test() {
   // Arrange: Create pubsub and subscribe to different groups
   let pubsub =
-    pubsub.new(
-      "test_group_isolation",
-      decode_utils.chat_message_decoder(),
-      decode_utils.AdminMessage("decode_error"),
-    )
+    pubsub.new("test_group_isolation", decode_utils.chat_message_decoder())
 
   let command_subject = process.new_subject()
   let selector =
@@ -200,27 +189,23 @@ pub fn group_isolation_test() {
     )
 
   // Publish to "private" group (different group)
-  let assert Ok(subscriber_count) =
+  let assert Ok(Nil) =
     pubsub.publish(
       pubsub,
       "private",
       decode_utils.Message("bob", "secret message"),
     )
 
-  // Assert: Should have 0 subscribers in private group
-  assert subscriber_count == 0
-
   // Should not receive message in general group
   let assert Error(_) = process.selector_receive(selector, 50)
 
   // But should receive message sent to correct group
-  let assert Ok(general_count) =
+  let assert Ok(Nil) =
     pubsub.publish(
       pubsub,
       "general",
       decode_utils.Message("alice", "public message"),
     )
-  assert general_count == 1
 
   let assert Ok(PubSubEvent(decode_utils.Message("alice", "public message"))) =
     process.selector_receive(selector, 100)
@@ -230,18 +215,13 @@ pub fn group_isolation_test() {
 pub fn distributed_behavior_simulation_test() {
   // Arrange: Create two pubsub instances with same scope (simulating different nodes)
   let pubsub1 =
-    pubsub.new(
-      "test_distributed_pubsub",
-      decode_utils.chat_message_decoder(),
-      decode_utils.AdminMessage("decode_error"),
-    )
+    pubsub.new("test_distributed_pubsub", decode_utils.chat_message_decoder())
 
   let pubsub2 =
     pubsub.new(
       "test_distributed_pubsub",
       // Same scope = distributed behavior
       decode_utils.chat_message_decoder(),
-      decode_utils.AdminMessage("decode_error"),
     )
 
   let command_subject = process.new_subject()
@@ -254,15 +234,12 @@ pub fn distributed_behavior_simulation_test() {
     )
 
   // Act: Publish from second "node" to same group
-  let assert Ok(subscriber_count) =
+  let assert Ok(Nil) =
     pubsub.publish(
       pubsub2,
       "distributed_group",
       decode_utils.UserJoined("distributed_user"),
     )
-
-  // Assert: Should find the subscriber from the first "node"
-  assert subscriber_count == 1
 
   // Subscriber should receive the message
   let assert Ok(PubSubEvent(decode_utils.UserJoined("distributed_user"))) =
@@ -273,18 +250,13 @@ pub fn distributed_behavior_simulation_test() {
 pub fn type_safety_through_scopes_test() {
   // Arrange: Create two pubsubs with different scopes and decoders
   let chat_pubsub =
-    pubsub.new(
-      "type_safety_chat",
-      decode_utils.chat_message_decoder(),
-      decode_utils.AdminMessage("decode_error"),
-    )
+    pubsub.new("type_safety_chat", decode_utils.chat_message_decoder())
 
   let metrics_pubsub =
     pubsub.new(
       "type_safety_metrics",
       // Different scope
       decode_utils.metric_event_decoder(),
-      decode_utils.TimerRecord("decode_error", 0),
     )
 
   let command_subject = process.new_subject()
@@ -297,23 +269,19 @@ pub fn type_safety_through_scopes_test() {
   let metrics_selector = pubsub.subscribe(metrics_pubsub, "shared_name")
 
   // Act: Publish to both scopes with same group name
-  let assert Ok(chat_count) =
+  let assert Ok(Nil) =
     pubsub.publish(
       chat_pubsub,
       "shared_name",
       decode_utils.Message("user", "hello"),
     )
 
-  let assert Ok(metrics_count) =
+  let assert Ok(Nil) =
     pubsub.publish(
       metrics_pubsub,
       "shared_name",
       decode_utils.GaugeUpdate("cpu", 0.75),
     )
-
-  // Assert: Each should only reach its own scope
-  assert chat_count == 1
-  assert metrics_count == 1
 
   // Verify messages are received in correct scopes
   let assert Ok(decode_utils.Message("user", "hello")) =
@@ -326,70 +294,61 @@ pub fn type_safety_through_scopes_test() {
 pub fn unsubscribe_test() {
   // Arrange: Create pubsub and subscribe
   let pubsub =
-    pubsub.new(
-      "test_unsubscribe",
-      decode_utils.chat_message_decoder(),
-      decode_utils.AdminMessage("decode_error"),
-    )
+    pubsub.new("test_unsubscribe", decode_utils.chat_message_decoder())
 
   let command_subject = process.new_subject()
   let _base_selector =
     process.new_selector() |> process.select_map(command_subject, DirectCommand)
 
-  let _subscriber_selector = pubsub.subscribe(pubsub, "temp_group")
+  let subscriber_selector = pubsub.subscribe(pubsub, "temp_group")
 
-  // Verify subscription exists
-  let assert Ok(count_before) =
+  // Verify subscription exists by publishing and receiving message
+  let assert Ok(Nil) =
     pubsub.publish(
       pubsub,
       "temp_group",
       decode_utils.Message("test", "before unsubscribe"),
     )
-  assert count_before == 1
+
+  // Verify message is received
+  let assert Ok(decode_utils.Message("test", "before unsubscribe")) =
+    process.selector_receive(subscriber_selector, 100)
 
   // Act: Unsubscribe
   pubsub.unsubscribe(pubsub, "temp_group")
 
-  // Assert: Should have no subscribers now
-  let assert Ok(count_after) =
+  // Publish message after unsubscribe - should not be received
+  let assert Ok(Nil) =
     pubsub.publish(
       pubsub,
       "temp_group",
       decode_utils.Message("test", "after unsubscribe"),
     )
-  assert count_after == 0
+
+  // Verify no message is received (timeout expected)
+  let assert Error(_) = process.selector_receive(subscriber_selector, 50)
 }
 
 // Test error handling for invalid operations
 pub fn error_handling_test() {
   let pubsub =
-    pubsub.new(
-      "test_errors_pubsub",
-      decode_utils.chat_message_decoder(),
-      decode_utils.AdminMessage("decode_error"),
-    )
+    pubsub.new("test_errors_pubsub", decode_utils.chat_message_decoder())
 
   // Test unsubscribe without subscribe - this now just succeeds silently
   pubsub.unsubscribe(pubsub, "nonexistent_group")
 
-  // Test publish to empty group (should succeed but reach 0 subscribers)
-  let assert Ok(count) =
+  // Test publish to empty group (should succeed)
+  let assert Ok(Nil) =
     pubsub.publish(
       pubsub,
       "empty_group",
       decode_utils.Message("user", "message to empty group"),
     )
-  assert count == 0
 }
 
 // Test subscriber count and debugging functions
 pub fn subscriber_utilities_test() {
-  let pubsub =
-    pubsub.new(
-      "test_utilities",
-      decode_utils.chat_message_decoder(),
-      decode_utils.AdminMessage("decode_error"),
-    )
+  let pubsub = pubsub.new("test_utilities", decode_utils.chat_message_decoder())
 
   // Initially no subscribers
   assert pubsub.subscriber_count(pubsub, "util_group") == 0
