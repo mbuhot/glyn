@@ -113,11 +113,10 @@ import my_app/orders
 import gleam/erlang/process
 
 pub fn main() {
-  // Create PubSub system with decoder and error default
+  // Create PubSub system with decoder
   let pubsub = pubsub.new(
     "orders",
     orders.event_decoder(),
-    orders.SystemAlert("decode_error")
   )
 
   // Subscribe returns a Selector that can be composed
@@ -128,10 +127,9 @@ pub fn main() {
       |> process.map_selector(OrderEvent)
     )
 
-  // Publish events (returns Result(Int, PubSubError) with subscriber count)
-  let assert Ok(reached) = pubsub.publish(pubsub, "processing",
+  // Publish events
+  let assert Ok(Nil) = pubsub.publish(pubsub, "processing",
     orders.OrderCreated("ORDER123", 99))
-  // reached == 1
 
   // Receive messages through selector
   let assert Ok(OrderEvent(orders.OrderCreated(id, amount))) =
@@ -204,7 +202,6 @@ pub fn start_order_processor() {
     let event_pubsub = pubsub.new(
       "events",
       orders.event_decoder(),
-      orders.SystemAlert("event_decode_error")
     )
 
     let command_registry = registry.new(

@@ -127,13 +127,13 @@
 ////  )
 ////
 ////  // Publish a chat message to all subscribers in "general" channel
-////  let assert Ok(subscriber_count) = pubsub.publish(
+////  let assert Ok(Nil) = pubsub.publish(
 ////    chat_pubsub,
 ////    "general",
 ////    Message("alice", "Hello everyone!")
 ////  )
 ////
-////  // Check how many subscribers received the message
+////  // Check current subscriber count for monitoring
 ////  let count = pubsub.subscriber_count(chat_pubsub, "general")
 ////  ```
 
